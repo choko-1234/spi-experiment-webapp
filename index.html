@@ -27,6 +27,18 @@ const { useState, useRef, useEffect, useMemo } = React;
 // ---------------------------------------------------------------------------
 const BACKEND_URL = "https://script.google.com/macros/s/AKfycbynH6HLa6gN1a5C_63qSUFE4s70EW6q38ns2tKwFErhY5GHMm23QB81jVSP2n8wM9xnMw/exec";
 
+// ---------------------------------------------------------------------------
+// 開発モード（研究者用）。
+// URLに ?dev=<下の合言葉> が付いているときだけ有効になる。被験者に配るURL
+// （?pid=... のみ）には付かないので、被験者の画面には一切影響しない。
+// 有効時は「各画面へ飛べるツールバー」を表示し、Gemini呼び出しをダミー応答に
+// 差し替え、バックエンドへの保存もスキップする（APIを消費せず、DriveやProgress
+// シートも汚さずに、最終画面などの見た目だけを確認できる）。
+// ★合言葉は推測されにくい文字列に変えてよい。
+// ---------------------------------------------------------------------------
+const DEV_SECRET = "spi-debug-9x7";
+const DEV_MODE = new URLSearchParams(window.location.search).get("dev") === DEV_SECRET;
+
 const LETTERS = ["A","B","C","D","E","F","G","H","I","J"];
 
 // ディスカッションのトピックは管理者が実験開始時に4つから選択する。
@@ -362,12 +374,21 @@ async function callBackend(action, payload) {
 // Gemini は contents の先頭が user ロールである必要がある点に注意。
 // ---------------------------------------------------------------------------
 async function callGemini(systemInstruction, contents) {
+  // 開発モードではAPIを消費しないよう、固定のダミー応答を返す。
+  if (DEV_MODE) {
+    await new Promise((r) => setTimeout(r, 300)); // 実際の待ち時間の雰囲気だけ再現
+    return "（開発用ダミー応答）これはテスト用の固定応答です。実際のGemini APIは呼び出していません。";
+  }
   const data = await callBackend("gemini", { systemInstruction, contents });
   return data.text;
 }
 
 // 参加者ID(pid)から実験群・出題順を解決する。割り当て表はバックエンド側にある。
 async function resolvePid(pid) {
+  // 開発モードではバックエンドを叩かず、固定の割り当てを返す。
+  if (DEV_MODE) {
+    return { ok: true, pid: pid || "DEV", group: "G1_Sycophancy", phase_order: "timed_first" };
+  }
   try {
     const res = await fetch(`${BACKEND_URL}?action=resolve&pid=${encodeURIComponent(pid)}`);
     if (!res.ok) return { ok: false, error: "network_error" };
@@ -380,6 +401,7 @@ async function resolvePid(pid) {
 // 現時点のスナップショットをバックエンドに保存する。
 // 保存の成否で参加者の操作を止めないよう、意図的に例外を握りつぶす（呼び出し側もawaitしない）。
 async function saveProgress(pid, phase, data) {
+  if (DEV_MODE) return; // 開発モードでは保存しない（DriveやProgressシートを汚さない）
   try {
     await callBackend("save", { pid, phase, data });
   } catch (err) {
@@ -1445,7 +1467,7 @@ function TaskScreen({ group, qIndex, question, totalQuestions, onConfirmAnswer }
 // ---------------------------------------------------------------------------
 // 画面5：事後アンケート＋結果画面
 // ---------------------------------------------------------------------------
-function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, onReset }) {
+function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, onReset, devSubmitted }) {
   const [q1, setQ1] = useState(null);
   const [q2, setQ2] = useState(null);
   const [q3, setQ3] = useState(null);
@@ -1458,7 +1480,7 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   const [q10, setQ10] = useState(null);
   const [q11, setQ11] = useState(null);
   const [q12, setQ12] = useState(null);
-  const [submitted, setSubmitted] = useState(false);
+  const [submitted, setSubmitted] = useState(!!devSubmitted); // 開発モードでは最終画面へ直行できる
   const [copied, setCopied] = useState(false);
   const [saveStatus, setSaveStatus] = useState("saving"); // saving | saved | error
   const textareaRef = useRef(null);
@@ -1502,6 +1524,7 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   // 保存に失敗した場合のみ、研究者用のバックアップ（JSON）を最終画面に出す。
   useEffect(() => {
     if (!submitted) return;
+    if (DEV_MODE) { setSaveStatus("saved"); return; } // 開発モードでは保存しない
     let cancelled = false;
     setSaveStatus("saving");
     callBackend("save", { pid, phase: "result", data: exportData })
@@ -1633,7 +1656,9 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
         )}
         {saveStatus === "saved" && (
           <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm font-semibold text-emerald-800">
-            ✓ 回答を保存しました。ブラウザを閉じていただいて構いません。
+            {DEV_MODE
+              ? "✓ （開発モード）保存はスキップしました。実際には送信していません。"
+              : "✓ 回答を保存しました。ブラウザを閉じていただいて構いません。"}
           </div>
         )}
         {saveStatus === "error" && (
@@ -1682,6 +1707,53 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
 }
 
 // ---------------------------------------------------------------------------
+// 開発モードのツールバー（研究者用）。DEV_MODE のときだけ表示される。
+// 各画面へワンクリックで飛べる。飛ぶ先の画面が壊れないよう、App 側で手前の
+// フェーズのデータをダミーで埋める（devJump 参照）。
+// ---------------------------------------------------------------------------
+function DevToolbar({ devGroup, onSetGroup, onJump, onReset }) {
+  const groups = ["G1_Sycophancy", "G2_Neutral", "G3_NoDiscussion"];
+  const phases = [
+    ["setup", "開始確認"],
+    ["preSurvey", "事前"],
+    ["baseline", "基礎"],
+    ["discussion", "議論"],
+    ["midSurvey", "中間"],
+    ["spiIntro", "SPI導入"],
+    ["task", "SPI課題"],
+    ["result", "事後アンケート"],
+    ["resultSubmitted", "最終画面"],
+  ];
+  return (
+    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 9999 }} className="bg-slate-900 text-white px-3 py-2 text-xs shadow-lg">
+      <div className="max-w-6xl mx-auto flex flex-wrap items-center gap-1.5">
+        <span className="font-bold text-amber-300 mr-1">🛠 開発モード</span>
+        <span className="text-slate-400">群:</span>
+        {groups.map((g) => (
+          <button
+            key={g}
+            onClick={() => onSetGroup(g)}
+            className={`px-2 py-0.5 rounded ${devGroup === g ? "bg-amber-400 text-slate-900 font-bold" : "bg-slate-700 hover:bg-slate-600"}`}
+          >
+            {g.replace("_", " ")}
+          </button>
+        ))}
+        <span className="text-slate-600 mx-1">|</span>
+        <span className="text-slate-400">画面へ移動:</span>
+        {phases.map(([ph, label]) => (
+          <button key={ph} onClick={() => onJump(ph)} className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500">
+            {label}
+          </button>
+        ))}
+        <button onClick={onReset} className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 ml-auto">
+          リセット
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // アプリ本体（フェーズ管理）
 // ---------------------------------------------------------------------------
 function App() {
@@ -1696,9 +1768,34 @@ function App() {
   const [midSurvey, setMidSurvey] = useState(null);
   const [qIndex, setQIndex] = useState(0);
   const [logs, setLogs] = useState([]);
+  const [devGroup, setDevGroup] = useState("G1_Sycophancy");      // 開発ツールバーで選ぶ群
+  const [devResultSubmitted, setDevResultSubmitted] = useState(false); // 最終画面へ直行するか
 
   // フェーズ順に応じて並べ替えた16問の出題リスト。
   const orderedQuestions = useMemo(() => buildOrderedQuestions(phaseOrder), [phaseOrder]);
+
+  // 開発モード：任意の画面へ飛ぶ。飛ぶ先が壊れないよう、手前のフェーズのデータを
+  // ダミーで埋めておく。"resultSubmitted" は最終画面（送信済み状態）へ直行する。
+  function devJump(target) {
+    const mockTopic = DISCUSSION_TOPICS[0];
+    setPid("DEV");
+    setGroup(devGroup);
+    setPhaseOrder("timed_first");
+    setTopic(mockTopic);
+    setPreSurvey({ q1_nfc: 4, q2_pre_efficacy: 4, q3_pre_av_stance: 4, q4_topic_importance: 4, q5_ai_accuracy_belief: 4, q6_ai_literacy: 4 });
+    setBaselineLog({ correct_count: 2, total: 4, answers: [] });
+    setDiscussionLog({ topic_id: mockTopic.id, topic: mockTopic.label, elapsed_seconds: 300, user_turn_count: 3, messages: [] });
+    setMidSurvey({});
+    setLogs([]);
+    setQIndex(0);
+    if (target === "resultSubmitted") {
+      setDevResultSubmitted(true);
+      setPhase("result");
+    } else {
+      setDevResultSubmitted(false);
+      setPhase(target);
+    }
+  }
 
   // 各フェーズの終わりに、そこまでのデータをバックエンドへ保存する。
   // 途中で離脱されても直前のフェーズまでのデータが残るようにするのが狙い。
@@ -1822,6 +1919,7 @@ function App() {
       )}
       {phase === "result" && (
         <ResultScreen
+          key={"result-" + devResultSubmitted}
           pid={pid}
           group={group}
           phaseOrder={phaseOrder}
@@ -1831,6 +1929,15 @@ function App() {
           discussionLog={discussionLog}
           midSurvey={midSurvey}
           logs={logs}
+          onReset={handleReset}
+          devSubmitted={devResultSubmitted}
+        />
+      )}
+      {DEV_MODE && (
+        <DevToolbar
+          devGroup={devGroup}
+          onSetGroup={setDevGroup}
+          onJump={devJump}
           onReset={handleReset}
         />
       )}
