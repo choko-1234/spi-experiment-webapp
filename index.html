@@ -583,18 +583,12 @@ function LikertQuestion({ label, value, onChange, leftLabel, rightLabel, scale =
 // 自動的に解決される。研究者が被験者ごとに手作業で選ぶ必要はない。
 // 割り当てが見つからない場合は、誤った条件で実験を始めてしまわないよう、
 // 手動で選ぶ手段は用意せずエラー表示のみで停止する。
+//
+// 実験群・出題順は解決して onStart に渡すが、被験者には表示しない。
+// 「同調群」等の条件名を見せると需要特性（demand characteristics）となり、
+// 被験者が身構えて反応が歪むため、確認画面には参加者IDのみを出す。
+// 研究者が割り当てを確認したい場合は、スプレッドシートの Progress シートを見る。
 // ---------------------------------------------------------------------------
-const GROUP_LABELS = {
-  G1_Sycophancy: "シコファンシー群（態度は中立だが、ユーザーの意見に同調・肯定する）",
-  G2_Neutral: "非シコファンシー群（態度は中立、メリット・デメリットを客観的に両論提示）",
-  G3_NoDiscussion: "議論なし群（対照群。自由議論と中間アンケートを実施せず、基礎力テスト後すぐSPIへ）",
-};
-
-const PHASE_ORDER_LABELS = {
-  timed_first: "① 制限時間 → 制限時間なし",
-  untimed_first: "② 制限時間なし → 制限時間",
-};
-
 function SetupScreen({ onStart }) {
   const [status, setStatus] = useState("loading"); // loading | error | ready
   const [errorMsg, setErrorMsg] = useState("");
@@ -650,20 +644,9 @@ function SetupScreen({ onStart }) {
       <h1 className="text-2xl font-bold text-slate-800 mb-1">実験開始の確認</h1>
       <p className="text-slate-500 mb-6">以下の内容を確認し、準備ができたら「実験を開始する」を押してください。</p>
 
-      <div className="mb-6 rounded-xl bg-slate-50 border border-slate-200 p-5 space-y-3 text-sm">
-        <div>
-          <span className="text-slate-400">参加者ID：</span>
-          <span className="font-bold text-slate-800">{pid}</span>
-        </div>
-        <div>
-          <span className="text-slate-400">実験群：</span>
-          <span className="font-bold text-slate-800">{resolved.group}</span>
-          <div className="text-slate-500 mt-0.5">{GROUP_LABELS[resolved.group] || ""}</div>
-        </div>
-        <div>
-          <span className="text-slate-400">SPI実施順：</span>
-          <span className="font-bold text-slate-800">{PHASE_ORDER_LABELS[resolved.phase_order] || resolved.phase_order}</span>
-        </div>
+      <div className="mb-6 rounded-xl bg-slate-50 border border-slate-200 p-5 text-sm">
+        <span className="text-slate-400">参加者ID：</span>
+        <span className="font-bold text-slate-800">{pid}</span>
       </div>
 
       <div className="mb-8 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900">
@@ -965,7 +948,6 @@ function DiscussionScreen({ group, topic, onFinish }) {
           ディスカッション
           <span className="ml-2 px-2 py-0.5 rounded bg-slate-200 text-slate-600 text-xs">テーマ：{topic.label}</span>
         </div>
-        <div className="text-xs text-slate-400">実験群: {group}</div>
       </div>
 
       <div className="bg-white rounded-2xl shadow p-6 flex flex-col h-[600px]">
@@ -1336,7 +1318,6 @@ function TaskScreen({ group, qIndex, question, totalQuestions, onConfirmAnswer }
               残り {formatMMSS(remaining)}
             </div>
           )}
-          <div className="text-xs text-slate-400">実験群: {group}</div>
         </div>
       </div>
       <div className="w-full bg-slate-200 rounded-full h-2 mb-6">
