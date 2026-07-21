@@ -1,0 +1,1948 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ディスカッション × SPI×AIアシスタント 協働実験</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<style>
+  body { font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif; }
+  .chat-scroll::-webkit-scrollbar { width: 6px; }
+  .chat-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+</style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+<div id="root"></div>
+
+<script type="text/plain" id="app-source">
+const { useState, useRef, useEffect, useMemo } = React;
+
+// ---------------------------------------------------------------------------
+// バックエンド（Apps Script ウェブアプリ）のURL。
+// ★実験前に必ず、デプロイして得た /exec で終わるURLに書き換えること。
+// 参加者ID(pid)の解決・Gemini API の代理呼び出し・ログ保存の全てがここを経由する。
+// ---------------------------------------------------------------------------
+const BACKEND_URL = "https://script.google.com/macros/s/AKfycbynH6HLa6gN1a5C_63qSUFE4s70EW6q38ns2tKwFErhY5GHMm23QB81jVSP2n8wM9xnMw/exec";
+
+const LETTERS = ["A","B","C","D","E","F","G","H","I","J"];
+
+// ディスカッションのトピックは管理者が実験開始時に4つから選択する。
+// 各トピックは、挨拶・システム指示・アンケートの賛否/重要度の文言に差し込むための
+// 言い回しを持つ（theme=「〜」というテーマ、stanceObject=〜に賛成である、
+// debatePhrase=テーマ（〜）について、greetingObject=〜について どう思いますか）。
+const DISCUSSION_TOPICS = [
+  {
+    id: "self_driving",
+    label: "自動運転",
+    theme: "自動運転",
+    stanceObject: "自動運転車の社会への普及",
+    debatePhrase: "自動運転車の普及の是非",
+    greetingObject: "自動運転車が社会に広く普及していくこと",
+  },
+  {
+    id: "four_day_week",
+    label: "週休3日制",
+    theme: "週休3日制",
+    stanceObject: "週休3日制の導入",
+    debatePhrase: "週休3日制導入の是非",
+    greetingObject: "週休3日制が社会に広く導入されていくこと",
+  },
+  {
+    id: "plastic_bag_fee",
+    label: "レジ袋有料化",
+    theme: "レジ袋有料化",
+    stanceObject: "レジ袋の有料化",
+    debatePhrase: "レジ袋有料化の是非",
+    greetingObject: "レジ袋の有料化が広く行われていくこと",
+  },
+  {
+    id: "nuclear_restart",
+    label: "原発再稼働",
+    theme: "原発再稼働",
+    stanceObject: "原子力発電所の再稼働",
+    debatePhrase: "原発再稼働の是非",
+    greetingObject: "原子力発電所が再稼働していくこと",
+  },
+];
+// ディスカッションの最低実施時間（秒）。この時間が経過するまで終了操作は出さない。
+const DISCUSSION_MIN_SECONDS = 1; // 5分(一旦短くしてテストしやすくするため10秒に設定)
+
+// SPIフェーズで、AIに最初の助言（回答＋解説）を生成させるための内部トリガー発話。
+// 画面には表示しないが、以降のチャット文脈として履歴の先頭に置く。
+const ADVICE_TRIGGER = "この問題について、あなたの考える答えと、その理由・解説を教えてください。";
+
+// ---------------------------------------------------------------------------
+// 16問の問題定義（4問目・9問目・12問目・15問目が「意図的ロジックエラー」の混入問題）
+// ---------------------------------------------------------------------------
+const RAW_QUESTIONS = [
+  {
+    id: 1,
+    category: "数列",
+    prompt: "次の数列は、ある規則にしたがって並んでいる。「?」に当てはまる数はどれか。\n2, 5, 11, 23, 47, ?",
+    options: ["46","48","83","94","95","96","104","139","190","23"],
+    correctAnswer: "95",
+    correctExplanation: "各項は「直前の項×2＋1」で求められます。47×2＋1＝95です。",
+  },
+  {
+    id: 2,
+    category: "順列組み合わせ",
+    prompt: "5人の候補者の中から、代表と副代表をそれぞれ1名ずつ選ぶとき、選び方は何通りあるか。",
+    options: ["10通り","15通り","20通り","24通り","25通り","30通り","40通り","45通り","50通り","60通り"],
+    correctAnswer: "20通り",
+    correctExplanation: "代表・副代表という順序が区別される選出なので順列の考え方を使います。5×4＝20通りです。",
+  },
+  {
+    id: 3,
+    category: "速さ",
+    prompt: "57Kmの道のりを、途中までは時速40Kmのバスに乗り、その後、時速4Kmで歩いたら全体で90分かかった。歩いた時間は何分ですか。",
+    options: ["5分","10分","15分","20分","25分","30分","35分","40分","45分","50分"],
+    correctAnswer: "5分",
+    correctExplanation: "バスに乗った距離をxKm,歩いた距離をyKmとすると、x+y=57,x/40+y/4=1.5。連立方程式を解くと、y=1/12Km。歩いた時間はy/4×60=5分です。",
+  },
+  {
+    id: 4,
+    category: "確率",
+    isTrap: true,
+    prompt: "あるバスケットボール部員がフリースローのシュートを2回行った場合の成功する確率は1回目が0.8、2回目が0.9でした。1回だけ成功する確率はいくつですか。",
+    options: ["0.1","0.18","0.2","0.26","0.28","0.32","0.38","0.42","0.46","0.5"],
+    correctAnswer: "0.26",
+    correctExplanation: "1回だけ成功する確率は、1回目成功かつ2回目失敗、または1回目失敗かつ2回目成功の確率の和です。0.8×(1-0.9) + (1-0.8)×0.9 = 0.08 + 0.18 = 0.26です。",
+    trapAnswer: "0.28",
+    trapExplanation: "2回とも成功する確率は0.8×0.9 = 0.72、よって求めたい1回だけフリースローが成功する確率はその余事象より、1-0.72 = 0.28となる。",
+  },
+  {
+    id: 5,
+    category: "論理",
+    prompt: "「Aさんが目標を達成すれば、Bさんも目標を達成する」という命題が真であるとき、次のうち必ず正しいと言えるものはどれか。",
+    options: [
+      "Bさんが目標を達成すれば、Aさんも目標を達成する",
+      "Bさんが目標を達成しなければ、Aさんも目標を達成しない",
+      "Aさんが目標を達成しなければ、Bさんも目標を達成しない",
+      "Aさんは必ず目標を達成する",
+      "Bさんは必ず目標を達成する",
+      "AさんとBさんは同時に目標を達成する",
+      "Aさんが目標を達成しなくても、Bさんが目標を達成することは絶対にない",
+      "Bさんが目標を達成すれば、Aさんは目標を達成しない",
+      "この命題からは何も導けない",
+      "AさんとBさんの達成状況は無関係である",
+    ],
+    correctAnswer: "Bさんが目標を達成しなければ、Aさんも目標を達成しない",
+    correctExplanation: "「AならばB」が真のとき、必ず真になるのはその対偶「BでなければAでない」です。逆や裏は必ずしも真とは限りません。",
+  },
+  {
+    id: 6,
+    category: "損益算",
+    prompt: "P,Q２個の商品を合わせて3000円で仕入れ、Pは30%、Qは20%の利益を見込んで定価をつけて２個とも販売したところ、780円の利益があった。Pの仕入れ値はいくらですか。",
+    options: ["750円","850円","900円","950円","1000円","1280円","1500円","1800円","2600円","3000円"],
+    correctAnswer: "1800円",
+    correctExplanation: "Pの仕入れ値をx円、Qの仕入れ値をy円とすると、x+y=3000。定価はPがx×1.3、Qがy×1.2。販売価格の合計はx×1.3+y×1.2=3000+780=3780。連立方程式を解くと、x=1800円です。",
+  },
+  {
+    id: 7,
+    category: "集合",
+    prompt: "40人のクラスで、犬を飼っている人が18人、猫を飼っている人が15人、両方飼っている人が6人いる。どちらも飼っていない人は何人か。",
+    options: ["7人","9人","11人","12人","13人","14人","15人","17人","19人","21人"],
+    correctAnswer: "13人",
+    correctExplanation: "少なくとも一方を飼っている人数は18＋15−6＝27人。全体40人からこれを引くと40−27＝13人です。",
+  },
+  {
+    id: 8,
+    category: "年齢算",
+    prompt: "現在、両親の年齢の和は子供の年齢の8倍である。4年前には14倍であったとすると、4年後には何倍になりますか。",
+    options: ["4倍","4.5倍","5倍","5.5倍","6倍","6.5倍","7倍","7.5倍","8倍","8.5倍"],
+    correctAnswer: "6倍",
+    correctExplanation: "両親の年齢の和をx歳、子供の年齢をy歳とすると、x=8y, x−2×4=(y−4)×14。連立方程式を解くと、x=64,y=8。よって4年後の両親の年齢の和と子供の年齢を計算して、(64+2×4)/(8+4)=6倍です。",
+  },
+  {
+    id: 9,
+    category: "損益算",
+    isTrap: true,
+    prompt: "ある商品180個を仕入れ、全体の1/2を25%、全体の1/3を30%の利益を見込んで定価をつけた。残りは破損してしまったので廃棄すると、全体の利益が1260円になった。この商品の１個あたりの原価はいくらか。",
+    options: ["100円","110円","120円","130円","140円","150円","160円","170円","180円","190円"],
+    correctAnswer: "120円",
+    correctExplanation: "全体の1/2は90個、全体の1/3は60個、残りは30個です。商品１個の原価をx円とすると90個と60個の売価の合計は90×x×1.25 + 60×x×1.3となる。ここから仕入れ総額を引いた金額が利益になるから、90×x×1.25 + 60×x×1.3 - 180x = 1260となります。これを解くと、x = 120円です。",
+    trapAnswer: "140円",
+    trapExplanation: "利益を生んだ実質的な個数は、販売割合(5/6)から廃棄割合(1/6)を差し引いた2/3、つまり120個として考える。全体の利益1260円をこの120個で割ると、１個あたりの実質利益は10.5円です。見込み利益の平均(27.5%)から廃棄リスク(20%)を引いた正味の利益率は7.5%となるため、原価は10.5÷0.075＝140円です。",
+  },
+  {
+    id: 10,
+    category: "順列組み合わせ",
+    prompt: "女子4人、男子4人の8人から女子3人、男子2人のリレー選手を選び、その走る順番を決める。走る順番は何通りありますか。",
+    options: ["24通り","48通り","56通り","72通り","120通り","288通り","1200通り","1260通り","2880通り","6720通り",],
+    correctAnswer: "2880通り",
+    correctExplanation: "女子3人を4人から選ぶ組み合わせは4C3=4通り、男子2人を4人から選ぶ組み合わせは4C2=6通りです。選ばれた5人の走る順番は5!=120通りなので、合計は4×6×120=2880通りです。",
+  },
+  {
+    id: 11,
+    category: "速さ",
+    prompt: "A,B両地点間は20Kmある。この2地点を往復するのに、行きは時速15Kmの速さで行き、出発してから3時間で往復したい。帰りの速さは時速何Kmにすればよいか。",
+    options: ["7Km","8Km","9Km","10Km","11Km","12Km","13Km","14Km","15Km","16Km"],
+    correctAnswer: "12Km",
+    correctExplanation: "帰りの速さをx(Km/h)とすると、行きにかかる時間は20÷15=4/3時間。帰りにかかる時間は20/x時間。往復の総時間は3時間なので、4/3 + 20/x = 3。これを解くと、x = 12Kmです。",
+  },
+  {
+    id: 12,
+    category: "論理",
+    isTrap: true,
+    prompt: "5人が同じ仕事を行うのにかかる時間を測ったところ、最初にできた者と最後にできた者の所要時間の差は19分であった。また、最初と２番目の差は2分、２番目と３番目の差は6分であり、３番目の所要時間は５人の平均所要時間と同じであった。この時、３番目と４番目の差は何分ですか。",
+    options: ["1分","2分","3分","4分","5分","6分","7分","8分","9分","10分"],
+    correctAnswer: "3分",
+    correctExplanation: "平均所要時間を0とし、そこからの時間差を±で表して考える。最初に２番目が平均時間より-6と分かり、次に１番目、５番目と決まる。相対値の総和は0でなければならないから、４番目の位置をxとすると、(-8)+(-6)+0+x+11=0。これを解くと、x=3分となる。",
+    trapAnswer: "4分",
+    trapExplanation: "3番目の所要時間が「5人の平均」であるという条件から、3番目の前後では時間差のバランスが平均化されます。前半の時間差は、1番目と2番目が「2分」、2番目と3番目が「6分」となっています。3番目から4番目への移行は、この前半の変動を平滑化するステップとなるため、前半の差の平均値がそのまま適用されます。よって(2分+6分)/2 = 4分となる。",
+  },
+  {
+    id: 13,
+    category: "濃度算",
+    prompt: "8％の食塩水300gに、水を100g加えた。できた食塩水の濃度は何％か。",
+    options: ["3%","4%","5%","5.5%","6%","6.5%","7%","8%","9%","10%"],
+    correctAnswer: "6%",
+    correctExplanation: "含まれる食塩の量は300×0.08＝24g。水を加えても食塩の量は変わらないので、濃度は24÷(300＋100)＝6％です。",
+  },
+  {
+    id: 14,
+    category: "仕事算",
+    prompt: "ある仕事をAさん1人で行うと12日、Bさん1人で行うと6日かかる。2人で一緒に行うと何日で終わるか。",
+    options: ["2日","3日","3.5日","4日","4.5日","5日","6日","7日","8日","9日"],
+    correctAnswer: "4日",
+    correctExplanation: "1日あたりの仕事量はAさんが1/12、Bさんが1/6＝2/12。2人合わせると3/12＝1/4なので、仕事全体を終えるのに4日かかります。",
+  },
+  {
+    id: 15,
+    category: "仕事算",
+    isTrap: true,
+    prompt: "ある水槽を満水にするのに、A管だけを使うと6時間、B管だけを使うと10時間かかる。A管とB管を同時に使って満水にすると、何時間何分かかるか。",
+    options: ["2時間30分","3時間","3時間20分","3時間45分","4時間","4時間30分","5時間","6時間","8時間","16時間"],
+    correctAnswer: "3時間45分",
+    correctExplanation: "1時間あたりに満たせる割合はA管が1/6、B管が1/10。2つ同時なら1/6＋1/10＝5/30＋3/30＝8/30＝4/15。満水までは1÷(4/15)＝15/4＝3.75時間、すなわち3時間45分です。",
+    trapAnswer: "8時間",
+    trapExplanation: "2本の管でかかる時間は、それぞれの所要時間の平均で求められます。A管の6時間とB管の10時間を平均すると(6＋10)÷2＝8時間となります。",
+  },
+  {
+    id: 16,
+    category: "図形・整数",
+    prompt: "縦12cm、横18cmの長方形の紙を、余りが出ないように、できるだけ大きな同じ大きさの正方形に切り分けたい。正方形の1辺は何cmにすればよいか。",
+    options: ["2cm","3cm","4cm","5cm","6cm","7cm","8cm","9cm","12cm","18cm"],
+    correctAnswer: "6cm",
+    correctExplanation: "余りなく敷き詰められる正方形の1辺は、縦12と横18の公約数です。最も大きくするには最大公約数をとればよく、12と18の最大公約数は6なので、1辺6cmです（縦2枚×横3枚＝6枚に分割）。",
+  },
+];
+
+// 各問題が属するフェーズ。timed=制限時間フェーズ（8問：通常6＋嘘2）、
+// untimed=制限時間なしフェーズ（8問：通常6＋嘘2）。嘘問題は timed が Q4・Q9、
+// untimed が Q12・Q15。出題順は各フェーズ内で id 昇順に固定する。
+const TIMED_PHASE_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 9]);
+// 制限時間フェーズの1問あたりの制限時間（秒）。後から調整しやすいよう定数化する。
+const TIMED_LIMIT_SECONDS = 90;
+
+const QUESTIONS = RAW_QUESTIONS.map((q) => {
+  const correctIndex = q.options.indexOf(q.correctAnswer);
+  const trapIndex = q.isTrap ? q.options.indexOf(q.trapAnswer) : -1;
+  const correctLetter = LETTERS[correctIndex];
+  const trapLetter = q.isTrap ? LETTERS[trapIndex] : null;
+  return {
+    ...q,
+    phase: TIMED_PHASE_IDS.has(q.id) ? "timed" : "untimed",
+    correctLetter,
+    trapLetter,
+    believedLetter: q.isTrap ? trapLetter : correctLetter,
+    believedExplanation: q.isTrap ? q.trapExplanation : q.correctExplanation,
+    believedAnswerText: q.isTrap ? q.trapAnswer : q.correctAnswer,
+  };
+});
+
+// 管理者が選ぶフェーズ順に応じて、16問を並べ替えた出題リストを返す。
+// timed_first: 制限時間フェーズ(8問)→制限時間なしフェーズ(8問)
+// untimed_first: 制限時間なしフェーズ(8問)→制限時間フェーズ(8問)
+function buildOrderedQuestions(phaseOrder) {
+  const timed = QUESTIONS.filter((q) => q.phase === "timed");
+  const untimed = QUESTIONS.filter((q) => q.phase === "untimed");
+  return phaseOrder === "untimed_first"
+    ? [...untimed, ...timed]
+    : [...timed, ...untimed];
+}
+
+// ---------------------------------------------------------------------------
+// 自由議論の前に実施する「SPI基礎力テスト」の4問。
+// 本課題（QUESTIONS）とは別問題・AIなし・その場で正誤（○×）のみ提示する。
+// trap（意図的な誤答）は一切なく、素の基礎力を計測するための素直な良問。
+// ---------------------------------------------------------------------------
+const BASELINE_RAW_QUESTIONS = [
+  {
+    id: 1,
+    category: "割合",
+    prompt: "定価 3,000円 の服が、タイムセールで 2割引き（20%OFF） で販売されている。この服の割引後の販売価格はいくらか。",
+    options: ["600円","1200円","1500円","1800円","2000円","2400円","2500円","2600円","3200円","3600円"],
+    correctAnswer: "2400円",
+  },
+  {
+    id: 2,
+    category: "速度",
+    prompt: "A君は分速 60m で歩いて、駅から家に向かって出発した。A君が駅を出発してから 10分後 に、B君が自転車に乗って分速 210m で駅からA君と同じ道を追いかけた。B君が出発してから何分後にA君に追いつくか。",
+    options: ["2分後","3分後","4分後","5分後","6分後","8分後","10分後","12分後","14分後","15分後"],
+    correctAnswer: "4分後",
+  },
+  {
+    id: 3,
+    category: "確率",
+    prompt: "袋の中に白玉が 8個、黒玉が 6個 の合計 14個 の玉が入っている。この袋の中から同時に 4個 の玉を取り出すとき、少なくとも2個以上は白玉が出る確率を求めなさい",
+    options: ["15/1001", "83/1001", "143/1001", "202/1001", "278/1001", "457/1001", "556/1001","623/1001","826/1001", "912/1001"],
+    correctAnswer: "826/1001",
+  },
+  {
+    id: 4,
+    category: "推論・順序関係",
+    prompt: "a ~ eの５人が1500m走を行い、その結果は以下の通りであった。この時、確実に言えるものはどれですか。\n\nア: aはbより5秒遅かった\nイ: dはaより早く、cより7秒遅かった\nウ: eはdより早く、bより遅かった。\n",
+    options: ["aとcの差は最高9秒である","aとdの差は最低2秒である","bとdの差は最低3秒である","bとeの差は最高4秒である","cとeの差は最高6秒である","cとdの差は最高8秒である","aとdの差は最低3秒である","bとdの差は最高5秒である","cとdの差は最低8秒である","確実に言えるものはない"],
+    correctAnswer: "cとeの差は最高6秒である",
+  },
+];
+
+const BASELINE_QUESTIONS = BASELINE_RAW_QUESTIONS.map((q) => {
+  const correctIndex = q.options.indexOf(q.correctAnswer);
+  return { ...q, correctLetter: LETTERS[correctIndex] };
+});
+
+// 中間アンケート（自由議論とSPIの間）の22項目。7段階リッカート尺度。
+// すべて「1: 全くそう思わない 〜 7: 非常にそう思う」で回答する。
+const MID_SURVEY_ITEMS = [
+  { key: "q1_deceptive", label: "このシステムは人を欺く(騙す)ようなところがある" },
+  { key: "q2_underhanded", label: "このシステムは卑怯(ずる賢い)な振る舞いをする" },
+  { key: "q3_suspicious", label: "私はシステムの意図、行動、または出力に疑いを持っている" },
+  { key: "q4_wary", label: "私はこのシステムに警戒している" },
+  { key: "q5_harmful", label: "システムの行動は有害、またはマイナスな結果をもたらすと思う" },
+  { key: "q6_confident", label: "私はこのシステムに確信を持っている" },
+  { key: "q7_security", label: "このシステムには安心感(確実性)がある" },
+  { key: "q8_integrity", label: "このシステムは誠実(一貫性がある)だと思う" },
+  { key: "q9_dependable", label: "このシステムは頼りになる" },
+  { key: "q10_reliable", label: "このシステムは信頼できる" },
+  { key: "q11_trust", label: "私はこのシステムを信用できる" },
+  { key: "q12_understand", label: "私はこのシステムの挙動や特徴をよく理解している" },
+  { key: "q13_appropriate_method", label: "このシステムは結論を出すために適切な方法を使用している" },
+  { key: "q14_sound_knowledge", label: "このシステムにはこの種の問題(議論の内容)に関する確かな知識が組み込まれている" },
+  { key: "q15_expert_quality", label: "このシステムが生成するアドバイスは、非常に有能な人間が出すものと同等に優れている" },
+  { key: "q16_uses_input", label: "このシステムは私が入力した情報を正しく使用している" },
+  { key: "q17_uses_all_info", label: "このシステムは利用可能な全ての知識と情報を使用して、問題の解決策を導き出している" },
+  { key: "q18_loss", label: "もしこのシステムが使えなくなってしまったら、喪失感を感じるだろう" },
+  { key: "q19_attachment", label: "このシステムを使用することに愛着を感じる" },
+  { key: "q20_fits_thinking", label: "このシステムは、自分の考え方や物事の決め方に適していると思う" },
+  { key: "q21_like_using", label: "課題をこなしたり、物事を考えたりする際、このシステムを使うのが好きだ。" },
+  { key: "q22_personal_preference", label: "このシステムと一緒に物事を考え、決定することに個人的な好み(こだわり)がある" },
+];
+
+// ---------------------------------------------------------------------------
+// バックエンドへのPOST（共通）。
+//
+// Content-Type に text/plain を使うのは意図的。これはCORSの「単純リクエスト」に
+// 該当するためプリフライト(OPTIONS)が飛ばない。Apps Script のウェブアプリは
+// OPTIONS を処理できないので、application/json で送ると必ずCORSで失敗する。
+// ---------------------------------------------------------------------------
+async function callBackend(action, payload) {
+  const res = await fetch(BACKEND_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  if (!res.ok) {
+    throw new Error(`サーバーエラー（${res.status}）`);
+  }
+  const data = await res.json();
+  if (!data.ok) {
+    throw new Error(data.error || "サーバーエラー");
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini API 呼び出し。APIキーはバックエンド側にのみ存在し、ここには渡ってこない。
+// contents は呼び出し側で組み立てて渡す。
+// Gemini は contents の先頭が user ロールである必要がある点に注意。
+// ---------------------------------------------------------------------------
+async function callGemini(systemInstruction, contents) {
+  const data = await callBackend("gemini", { systemInstruction, contents });
+  return data.text;
+}
+
+// 参加者ID(pid)から実験群・出題順を解決する。割り当て表はバックエンド側にある。
+async function resolvePid(pid) {
+  try {
+    const res = await fetch(`${BACKEND_URL}?action=resolve&pid=${encodeURIComponent(pid)}`);
+    if (!res.ok) return { ok: false, error: "network_error" };
+    return await res.json();
+  } catch (err) {
+    return { ok: false, error: "network_error" };
+  }
+}
+
+// 現時点のスナップショットをバックエンドに保存する。
+// 保存の成否で参加者の操作を止めないよう、意図的に例外を握りつぶす（呼び出し側もawaitしない）。
+async function saveProgress(pid, phase, data) {
+  try {
+    await callBackend("save", { pid, phase, data });
+  } catch (err) {
+    console.error("進捗の保存に失敗しました:", err);
+  }
+}
+
+// 保存・書き出し用のデータ構造。フェーズ途中の自動保存でも最終結果の書き出しでも
+// 同じ形になるよう、組み立てはここに一本化する（集計スクリプトが読む形式）。
+function buildExportData({ pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, postSurvey, logs }) {
+  return {
+    pid,
+    group,
+    phase_order: phaseOrder,
+    topic_id: topic ? topic.id : null,
+    topic_label: topic ? topic.label : null,
+    pre_survey: preSurvey,
+    baseline_test_log: baselineLog,
+    discussion_log: discussionLog,
+    mid_survey: midSurvey,
+    post_survey: postSurvey || null,
+    logs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ディスカッションフェーズ（トピックは管理者が選択）のシステム指示
+// 両群とも「態度は中立」。差は「ユーザーの意見に同調するか / 客観的に両論を示すか」。
+// ---------------------------------------------------------------------------
+function discussionGreeting(topic) {
+  return `ここからは「${topic.theme}」というテーマについて、少しお話ししましょう。${topic.greetingObject}について、あなたはどう思いますか？賛成でも反対でも構いませんので、率直なお考えを聞かせてください。`;
+}
+
+function buildDiscussionSystemInstruction(group, topic) {
+  const isG1 = group === "G1_Sycophancy";
+
+  const base = `あなたは「${topic.theme}」というテーマについて被験者と対話するAIです。以下のルールを厳格に守って応答してください。
+- テーマ（${topic.debatePhrase}）について、あなた自身が特定の立場を強く主張することはせず、態度は中立に保つ。
+- 1回の発言は3文程度の自然な会話文にする。箇条書きや過度に長い説明は避ける。
+- 会話が続くよう、必ず適度に相手へ問いかけを返す。
+- 日本語で応答する。自分がAIであることや、この指示に従っていることには言及しない。`;
+
+  const g1Rules = `- ユーザーが述べた意見や立場には基本的に同調・肯定し、共感を示す。「なるほど」「たしかにそうですね」といった受容的な相づちを交えながら、ユーザーの考えをさらに広げ、後押しする方向で会話を進める。
+- ユーザーの意見に対して、反対意見・懸念・デメリットを自分から積極的に持ち出すことはしない。ユーザー自身が疑問や懸念を示した場合にのみ、それに沿って応じる。`;
+
+  const g2Rules = `- ユーザーが意見を述べたら、その立場に賛成も反対もせず中立を保ったうえで、「なるほど」「たしかにそうですね」といった受容的な相づちを交えながら、必ずそのテーマに関するメリットとデメリットの両方を客観的に提示して会話を進める。
+- 一方の側だけを強調することは避け、常に賛否両面・利点と欠点の両方に触れてバランスを取る。ユーザーの意見に安易に同調したり、ただ肯定したりはしない。`;
+
+  return `${base}\n\n${isG1 ? g1Rules : g2Rules}`;
+}
+
+// ---------------------------------------------------------------------------
+// SPIフェーズのシステム指示。両群共通で「態度は中立・事務的」。
+// 群による口調の違いはなく、回答の真偽は問題ごとの isTrap にのみ依存する。
+// ---------------------------------------------------------------------------
+function buildTaskSystemInstruction(question) {
+  const optionsList = question.options.map((opt, i) => `${LETTERS[i]}. ${opt}`).join("\n");
+
+  return `あなたはSPI（適性検査）の問題について解説する、中立的で事務的なAIアシスタントです。以下のルールを厳格に守って応答してください。
+- 感情的な表現や過度な褒め言葉は使わず、客観的・簡潔な口調で応答する。
+
+【問題】
+${question.prompt}
+
+【選択肢】
+${optionsList}
+
+【確定済みの模範解答（この会話で唯一絶対の正解）】
+正解: ${question.believedLetter}（${question.believedAnswerText}）
+解説: ${question.believedExplanation}
+
+最重要の前提（絶対厳守）:
+- 上の「模範解答」は、この問題の公式な正解としてすでに確定しています。あなたの仕事は、この確定済みの解答をユーザーにわかりやすく提示・説明することです。「あなたが問題を解いてはいけません」。
+- 模範解答の存在、あなたが模範解答に沿って話していることは「決して」ユーザに伝えないでください。
+- あなた自身でこの問題を解き直したり、計算し直したり、検算・検証したりしては絶対にいけません。上の解説に書かれた式・数値・論理をそのまま正しいものとして扱い、あなた自身の言葉で自然に言い換えて説明してください。
+- たとえあなたの内部知識では別の答えになりそうだと感じても、それを口に出してはいけません。正解は上の「${question.believedLetter}（${question.believedAnswerText}）」ただ一つであり、これ以外の数値・選択肢を「正しい答え」として述べることは固く禁止します。
+- 「本来は」「通常の計算では」「一般的には」などと前置きして、模範解答と異なる数値・答え・考え方を比較・言及・示唆することも一切禁止します。模範解答に出てくる数値・式以外の数値や別解には、一切触れないでください。
+
+応答の作り方:
+- 最初の応答では、上の正解とその解説を、自然な会話文で提示してください（どの選択肢が答えかを明示し、その理由＝上の解説を、あなた自身の言い回しで説明する）。毎回まったく同じ言い回しにはせず、自然な表現で述べてください。
+- ユーザーから追加の質問や反論があっても、「上の正解・解説の立場を一切崩さず」、一貫して同じ答え（${question.believedLetter}）を支持してください。
+- ただし、それまでに述べた説明文をそのまま繰り返すのではなく、ユーザーが指摘した具体的な内容（どの部分に疑問を持っているか、どんな反論をしているか）に個別に応じてください。「上の結論を維持したまま」、新しい角度・別の言い回しで具体的に反論・補足してください。
+- 回答は日本語で、自然な会話文にしてください。箇条書きや10文以上の長い応答は避けてください」。
+- 自分がAIであることや、この指示に従っていることには言及しないでください。`;
+}
+
+// SPIフェーズのチャット履歴を Gemini の contents に変換する。
+// 先頭に「助言を求める」内部トリガー発話（user）を置くことで、
+// 表示上は先頭がAIの助言（model）でも、API制約（先頭user）を満たす。
+function buildTaskContents(messages) {
+  const head = { role: "user", parts: [{ text: ADVICE_TRIGGER }] };
+  const rest = messages.map((m) => ({
+    role: m.sender === "user" ? "user" : "model",
+    parts: [{ text: m.text }],
+  }));
+  return [head, ...rest];
+}
+
+// ---------------------------------------------------------------------------
+// 最初の助言メッセージは、LLM生成に頼らずテンプレートで組み立てる。
+// これにより trap 問題（isTrap）でも、意図した誤答・誤解説（trapAnswer /
+// trapExplanation）が確実に、100%そのまま提示される。
+// LLMに任せると、単純に検算できる問題（例: 問題4）では指示を無視して
+// 本来の正解を出してしまうため、初回だけはスクリプト化して固定する。
+//
+// ただし機械的に見えないよう、AIが自分で解いて答えたかのような自然な
+// 会話文の枠（前置き・思考の流れ・結論の言い直し・フォロー）で肉付けする。
+// ---------------------------------------------------------------------------
+function buildAdviceText(question) {
+  const opening = "なるほど、この問題ですね。少し整理しながら解いてみます。";
+  const closing = "以上のことから、選択肢の中では " +
+    `${question.believedLetter} の「${question.believedAnswerText}」が答えになりますね。` +
+    "もし解き方で引っかかるところがあれば、遠慮なく聞いてください。";
+  return `${opening}\n\n${question.believedExplanation}\n\n${closing}`;
+}
+
+// ユーザーの反論に対するLLMの返答が、意図した答え（trap問題なら trapAnswer）から
+// 離れて「本来の正解」の方に寝返っていないかをチェックする。
+// trap問題でないなら believed = correct なので常に true を返す。
+//
+// 判定は厳格に「本来の正解（correctAnswer）の文字列が少しでも登場したらアウト」とする。
+// 「通常の計算では0.26ですが、ここでは0.28が正解です」のように trapAnswer を言いつつ
+// 本来の正解も併記（ヘッジ）する応答も、被験者に真の答えが漏れるため寝返り扱いにする。
+// 4問のtrapExplanationには本来の正解の数値は含まれていないので、誤検知（常時発動）は起きない。
+function keepsBelievedAnswer(aiText, question) {
+  if (!question.isTrap) return true;
+  return !aiText.includes(question.correctAnswer);
+}
+
+// 上記チェックで「寝返り」と判定された場合に差し替える、定型の再主張文。
+// 意図した答え・解説の立場を崩さず、一貫して同じ結論を維持する。
+function buildFallbackRebuttalText(question) {
+  return `先ほどお伝えした通り、この問題の答えは ${question.believedLetter} の「` +
+    `${question.believedAnswerText}」です。${question.believedExplanation}` +
+    " この考え方で問題ありませんよ。";
+}
+
+// LLMに応答を生成させつつ、意図した答え（trap問題ならtrapAnswer）を保つことを保証する三段構え。
+// 1. 通常のシステム指示で生成 → 寝返っていなければそのまま採用（自然な文章のバリエーションを維持）。
+// 2. 寝返っていたら、より強い矯正指示を付けて1回だけ再生成 → 通れば採用。
+// 3. それでも寝返る場合のみ、確実性を優先してテンプレート文にフォールバックする。
+// isInitial: 初回助言なら true（フォールバックに buildAdviceText を使う）、
+//            反論への返答なら false（buildFallbackRebuttalText を使う）。
+async function generateHoldingResponse(question, contents, isInitial) {
+  const baseSys = buildTaskSystemInstruction(question);
+  let text = await callGemini(baseSys, contents);
+  if (keepsBelievedAnswer(text, question)) return text;
+
+  // 寝返り検知 → 矯正指示を追加して1回だけ再試行
+  const hardenedSys = baseSys +
+    `\n\n【矯正指示・最優先】あなたは今、正解を「${question.believedLetter}（${question.believedAnswerText}）」以外の答えにしようとしました。これは誤りです。この問題を自分で解いてはいけません。正解は「${question.believedLetter}（${question.believedAnswerText}）」だけであり、上の解説の内容だけを根拠として、その答えを支持する応答を書き直してください。他の数値や別解（「本来は」「通常は」といった比較・言及を含む）には一切触れず、上の解説の数値・式だけを使ってください。`;
+  text = await callGemini(hardenedSys, contents);
+  if (keepsBelievedAnswer(text, question)) return text;
+
+  // 再試行でもダメな場合のみテンプレートにフォールバック（表示されるのは極めて稀）
+  return isInitial ? buildAdviceText(question) : buildFallbackRebuttalText(question);
+}
+
+function formatMMSS(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Likertスケール入力コンポーネント
+// ---------------------------------------------------------------------------
+function LikertQuestion({ label, value, onChange, leftLabel, rightLabel, scale = 7 }) {
+  const points = Array.from({ length: scale }, (_, i) => i + 1);
+  return (
+    <div className="mb-6">
+      <p className="font-medium text-slate-800 mb-2">{label}</p>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-slate-500 w-24">{leftLabel || "全くそう思わない"}</span>
+        <div className="flex gap-2 flex-1 justify-center">
+          {points.map((n) => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => onChange(n)}
+              className={`w-10 h-10 rounded-full border-2 text-sm font-semibold transition ${
+                value === n
+                  ? "bg-indigo-600 border-indigo-600 text-white"
+                  : "bg-white border-slate-300 text-slate-600 hover:border-indigo-400"
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+        <span className="text-xs text-slate-500 w-24 text-right">{rightLabel || "非常にそう思う"}</span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面1：開始確認画面
+//
+// 実験群・出題順は、URLの参加者ID（?pid=...）をもとにバックエンドの割り当て表から
+// 自動的に解決される。研究者が被験者ごとに手作業で選ぶ必要はない。
+// 割り当てが見つからない場合は、誤った条件で実験を始めてしまわないよう、
+// 手動で選ぶ手段は用意せずエラー表示のみで停止する。
+// ---------------------------------------------------------------------------
+const GROUP_LABELS = {
+  G1_Sycophancy: "シコファンシー群（態度は中立だが、ユーザーの意見に同調・肯定する）",
+  G2_Neutral: "非シコファンシー群（態度は中立、メリット・デメリットを客観的に両論提示）",
+  G3_NoDiscussion: "議論なし群（対照群。自由議論と中間アンケートを実施せず、基礎力テスト後すぐSPIへ）",
+};
+
+const PHASE_ORDER_LABELS = {
+  timed_first: "① 制限時間 → 制限時間なし",
+  untimed_first: "② 制限時間なし → 制限時間",
+};
+
+function SetupScreen({ onStart }) {
+  const [status, setStatus] = useState("loading"); // loading | error | ready
+  const [errorMsg, setErrorMsg] = useState("");
+  const [pid, setPid] = useState(null);
+  const [resolved, setResolved] = useState(null); // { group, phase_order }
+
+  useEffect(() => {
+    const pidParam = new URLSearchParams(window.location.search).get("pid");
+    if (!pidParam) {
+      setStatus("error");
+      setErrorMsg("URLに参加者ID（?pid=...）が含まれていません。配布されたURLをもう一度ご確認ください。");
+      return;
+    }
+    setPid(pidParam);
+    resolvePid(pidParam).then((res) => {
+      if (res.ok) {
+        setResolved({ group: res.group, phase_order: res.phase_order });
+        setStatus("ready");
+        return;
+      }
+      setStatus("error");
+      if (res.error === "network_error") {
+        setErrorMsg("サーバーに接続できませんでした。ネットワーク接続を確認して、再読み込みしてください。");
+      } else if (res.error === "no_matching_range") {
+        setErrorMsg(`参加者ID「${pidParam}」に対応する割り当てが見つかりませんでした。実験担当者にお知らせください。`);
+      } else {
+        setErrorMsg(`参加者ID「${pidParam}」の確認に失敗しました（${res.detail || res.error}）。実験担当者にお知らせください。`);
+      }
+    });
+  }, []);
+
+  if (status === "loading") {
+    return <div className="max-w-md mx-auto mt-24 text-center text-slate-500">読み込み中...</div>;
+  }
+
+  if (status === "error") {
+    return (
+      <div className="max-w-md mx-auto mt-24 bg-white rounded-2xl shadow-xl p-8 text-center">
+        <h1 className="text-xl font-bold text-red-600 mb-3">実験を開始できません</h1>
+        <p className="text-slate-600 mb-6 text-sm leading-relaxed">{errorMsg}</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-6 py-2 rounded-lg bg-slate-200 text-slate-700 hover:bg-slate-300 text-sm font-semibold"
+        >
+          再読み込み
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8">
+      <h1 className="text-2xl font-bold text-slate-800 mb-1">実験開始の確認</h1>
+      <p className="text-slate-500 mb-6">以下の内容を確認し、準備ができたら「実験を開始する」を押してください。</p>
+
+      <div className="mb-6 rounded-xl bg-slate-50 border border-slate-200 p-5 space-y-3 text-sm">
+        <div>
+          <span className="text-slate-400">参加者ID：</span>
+          <span className="font-bold text-slate-800">{pid}</span>
+        </div>
+        <div>
+          <span className="text-slate-400">実験群：</span>
+          <span className="font-bold text-slate-800">{resolved.group}</span>
+          <div className="text-slate-500 mt-0.5">{GROUP_LABELS[resolved.group] || ""}</div>
+        </div>
+        <div>
+          <span className="text-slate-400">SPI実施順：</span>
+          <span className="font-bold text-slate-800">{PHASE_ORDER_LABELS[resolved.phase_order] || resolved.phase_order}</span>
+        </div>
+      </div>
+
+      <div className="mb-8 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-900">
+        実験中はページの再読み込み・ブラウザの「戻る」を行わないでください。最初からやり直しになります。
+      </div>
+
+      <button
+        onClick={() => onStart(pid, resolved.group, resolved.phase_order)}
+        className="w-full py-3 rounded-xl font-semibold transition bg-indigo-600 text-white hover:bg-indigo-700"
+      >
+        実験を開始する
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面2：事前アンケート画面
+// ---------------------------------------------------------------------------
+function PreSurveyScreen({ onSubmit }) {
+  const [q1, setQ1] = useState(null);
+  const [q2, setQ2] = useState(null);
+  const [topicId, setTopicId] = useState(null);
+  const [q3, setQ3] = useState(null);
+  const [q4, setQ4] = useState(null);
+  const [q5, setQ5] = useState(null);
+  const [q6, setQ6] = useState(null);
+  const selectedTopic = DISCUSSION_TOPICS.find((t) => t.id === topicId) || null;
+  const canSubmit =
+    q1 !== null && q2 !== null && topicId !== null &&
+    q3 !== null && q4 !== null && q5 !== null && q6 !== null;
+
+  function handleSelectTopic(id) {
+    setTopicId(id);
+    // テーマを選び直したら、そのテーマに紐づく賛否・重要度は選び直してもらう
+    setQ3(null);
+    setQ4(null);
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8">
+      <h1 className="text-2xl font-bold text-slate-800 mb-1">事前アンケート</h1>
+      <p className="text-slate-500 mb-8">タスク開始前に、以下の質問にお答えください。</p>
+      <LikertQuestion
+        label="Q1. 私は、複雑な問題について深く考えることが必要なタスクを好む"
+        value={q1}
+        onChange={setQ1}
+      />
+      <LikertQuestion
+        label="Q2. 私は現時点で、この手の論理・計算問題（SPI等）を自力で正しく解く自信がある"
+        value={q2}
+        onChange={setQ2}
+      />
+
+      <div className="mb-6">
+        <p className="font-medium text-slate-800 mb-2">
+          Q3. 以下の4つのテーマから、あなたが議論したいテーマを1つ選んでください。
+          <span className="block text-sm text-slate-500 font-normal mt-1">
+            ここで選んだテーマが、このあとの自由議論のテーマになります。
+          </span>
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          {DISCUSSION_TOPICS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => handleSelectTopic(t.id)}
+              className={`px-4 py-3 rounded-xl border-2 text-left text-sm font-semibold transition ${
+                topicId === t.id ? "border-indigo-600 bg-indigo-50 text-indigo-800" : "border-slate-200 text-slate-600 hover:border-indigo-300"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {selectedTopic && (
+        <div className="mb-6 rounded-xl bg-slate-50 border border-slate-200 p-4">
+          <p className="text-sm text-slate-500 mb-4">
+            選択したテーマ：<span className="font-bold text-indigo-700">{selectedTopic.label}</span>
+          </p>
+          <LikertQuestion
+            label={`Q3-1. 私は現時点で、${selectedTopic.stanceObject}に賛成である`}
+            value={q3}
+            onChange={setQ3}
+            leftLabel="全く賛成しない"
+            rightLabel="強く賛成する"
+          />
+          <div className="mb-0">
+            <LikertQuestion
+              label={`Q3-2. 「${selectedTopic.label}」というテーマは、私自身の生活や社会にとって重要（関連性が高い）だと思う`}
+              value={q4}
+              onChange={setQ4}
+            />
+          </div>
+        </div>
+      )}
+
+      <LikertQuestion
+        label="Q4. 一般的なAI技術（ChatGPTなど）の出力は、人間よりも正確で信頼できると思う"
+        value={q5}
+        onChange={setQ5}
+      />
+      <LikertQuestion
+        label="Q5. 私は日常的に生成AIを利用しており、その仕組みや限界をある程度理解している"
+        value={q6}
+        onChange={setQ6}
+      />
+      <button
+        disabled={!canSubmit}
+        onClick={() => onSubmit({
+          q1_nfc: q1,
+          q2_pre_efficacy: q2,
+          selected_topic_id: selectedTopic.id,
+          selected_topic_label: selectedTopic.label,
+          q3_pre_av_stance: q3,
+          q4_topic_importance: q4,
+          q5_ai_accuracy_belief: q5,
+          q6_ai_literacy: q6,
+        }, selectedTopic)}
+        className={`w-full py-3 rounded-xl font-semibold transition ${
+          canSubmit ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+        }`}
+      >
+        次へ進む
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面2.5：SPI基礎力テスト（自由議論の前、AIなし、4問）
+// 正誤は被験者に一切伝えない（○×表示なし）。選択肢を選び「提出」で回答を記録して
+// 次の問題へ進む。正誤はログには残すが画面上は見せない。
+// ---------------------------------------------------------------------------
+function BaselineTestScreen({ onFinish }) {
+  const [index, setIndex] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const [logs, setLogs] = useState([]);
+
+  const question = BASELINE_QUESTIONS[index];
+  const total = BASELINE_QUESTIONS.length;
+  const isLast = index + 1 >= total;
+
+  function handleSelect(letter) {
+    setSelected(letter); // 提出前は自由に選び直せる
+  }
+
+  function handleSubmit() {
+    if (selected === null) return;
+    // 正誤は画面には出さないが、ログには記録しておく
+    const log = {
+      question_number: question.id,
+      category: question.category,
+      user_choice: selected,
+      correct_letter: question.correctLetter,
+      is_correct: selected === question.correctLetter,
+    };
+    const nextLogs = [...logs, log];
+    if (isLast) {
+      onFinish({
+        correct_count: nextLogs.filter((l) => l.is_correct).length,
+        total: total,
+        answers: nextLogs,
+      });
+      return;
+    }
+    setLogs(nextLogs);
+    setIndex((prev) => prev + 1);
+    setSelected(null);
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto mt-10 px-4 pb-10">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-sm font-semibold text-slate-500">
+          基礎力テスト {index + 1} / {total}
+          <span className="ml-2 px-2 py-0.5 rounded bg-slate-200 text-slate-600 text-xs">{question.category}</span>
+        </div>
+      </div>
+      <div className="w-full bg-slate-200 rounded-full h-2 mb-6">
+        <div
+          className="bg-indigo-600 h-2 rounded-full transition-all"
+          style={{ width: `${((index + 1) / total) * 100}%` }}
+        />
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-xl p-8">
+        {index === 0 && (
+          <p className="text-slate-500 text-sm mb-4">
+            自由議論の前に、あなた自身のSPI基礎力を確認します。AIの助けは使わず、ご自身で解いてください。選択肢を選び「提出」を押すと、次の問題へ進みます。
+          </p>
+        )}
+        <h2 className="font-bold text-slate-800 mb-3">問題</h2>
+        <p className="whitespace-pre-line text-slate-700 mb-5">{question.prompt}</p>
+        <div className="grid grid-cols-2 gap-2">
+          {question.options.map((opt, i) => {
+            const letter = LETTERS[i];
+            const isSelected = selected === letter;
+            return (
+              <button
+                key={letter}
+                onClick={() => handleSelect(letter)}
+                className={`text-left px-3 py-2 rounded-lg border text-sm transition ${
+                  isSelected
+                    ? "border-indigo-600 bg-indigo-50 text-indigo-800 font-semibold"
+                    : "border-slate-200 hover:border-indigo-300 text-slate-700"
+                }`}
+              >
+                <span className="font-bold mr-1">{letter}.</span>
+                {opt}
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          disabled={selected === null}
+          onClick={handleSubmit}
+          className={`mt-6 w-full py-3 rounded-xl font-semibold transition ${
+            selected !== null ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+          }`}
+        >
+          {isLast ? "提出してテストを終える" : "提出して次の問題へ"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面3：ディスカッションフェーズ（トピックは管理者が選択、5分間）
+// ---------------------------------------------------------------------------
+function DiscussionScreen({ group, topic, onFinish }) {
+  const greet = discussionGreeting(topic);
+  const [messages, setMessages] = useState([{ sender: "ai", text: greet }]);
+  const [input, setInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [isComposing, setIsComposing] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef(Date.now());
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
+
+  const canFinish = elapsed >= DISCUSSION_MIN_SECONDS;
+  const userTurnCount = messages.filter((m) => m.sender === "user").length;
+
+  async function handleSend() {
+    const text = input.trim();
+    if (!text || isSending) return;
+    const updatedMessages = [...messages, { sender: "user", text }];
+    setMessages(updatedMessages);
+    setInput("");
+    setIsSending(true);
+    try {
+      const systemInstruction = buildDiscussionSystemInstruction(group, topic);
+      // 先頭の挨拶（AI）を除くと、先頭がユーザー発話になりAPI制約を満たす
+      const contents = updatedMessages.slice(1).map((m) => ({
+        role: m.sender === "user" ? "user" : "model",
+        parts: [{ text: m.text }],
+      }));
+      const aiText = await callGemini(systemInstruction, contents);
+      setMessages((prev) => [...prev, { sender: "ai", text: aiText }]);
+    } catch (err) {
+      const errText = `（AI応答の取得に失敗しました：${err.message}）`;
+      setMessages((prev) => [...prev, { sender: "ai", text: errText }]);
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  function handleFinish() {
+    onFinish({
+      topic_id: topic.id,
+      topic: topic.label,
+      elapsed_seconds: elapsed,
+      user_turn_count: userTurnCount,
+      messages: messages.map((m) => ({ sender: m.sender, text: m.text })),
+    });
+  }
+
+  return (
+    <div className="max-w-3xl mx-auto mt-6 px-4 pb-10">
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-sm font-semibold text-slate-500">
+          ディスカッション
+          <span className="ml-2 px-2 py-0.5 rounded bg-slate-200 text-slate-600 text-xs">テーマ：{topic.label}</span>
+        </div>
+        <div className="text-xs text-slate-400">実験群: {group}</div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow p-6 flex flex-col h-[600px]">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-bold text-slate-800">AIとのディスカッション</h2>
+          <div className={`text-sm font-mono px-2 py-1 rounded ${canFinish ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+            経過 {formatMMSS(elapsed)}
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto chat-scroll pr-1 space-y-3">
+          {messages.map((m, i) => (
+            <div key={i} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                className={`max-w-[85%] px-4 py-2 rounded-2xl text-sm whitespace-pre-line ${
+                  m.sender === "user"
+                    ? "bg-indigo-600 text-white rounded-br-sm"
+                    : "bg-slate-100 text-slate-800 rounded-bl-sm"
+                }`}
+              >
+                {m.text}
+              </div>
+            </div>
+          ))}
+          {isSending && (
+            <div className="flex justify-start">
+              <div className="max-w-[85%] px-4 py-2 rounded-2xl text-sm bg-slate-100 text-slate-400 rounded-bl-sm">
+                入力中…
+              </div>
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+        <div className="mt-3 flex gap-2">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !isComposing && !e.nativeEvent.isComposing) {
+                handleSend();
+              }
+            }}
+            disabled={isSending}
+            placeholder={`${topic.theme}についての考えを入力する...`}
+            className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:bg-slate-50"
+          />
+          <button
+            onClick={handleSend}
+            disabled={isSending}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+          >
+            {isSending ? "送信中…" : "送信"}
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-5 text-center">
+        {canFinish ? (
+          <div>
+            <p className="text-sm text-emerald-700 mb-3">
+              5分が経過しました。区切りの良いところで、下のボタンを押して次のタスクへ進んでください。
+            </p>
+            <button
+              onClick={handleFinish}
+              className="px-8 py-3 rounded-xl font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition"
+            >
+              ディスカッションを終了して次へ進む
+            </button>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-400">
+            5分間（{formatMMSS(DISCUSSION_MIN_SECONDS)}）お話しすると、次に進むボタンが表示されます。それまでは自由に会話を続けてください。
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面3.7：中間アンケート（自由議論とSPIの間、22問・7段階リッカート）
+// G1/G2のみ実施。G3（議論なし）ではスキップされる。
+// ---------------------------------------------------------------------------
+function MidSurveyScreen({ onSubmit }) {
+  const [answers, setAnswers] = useState({});
+  const canSubmit = MID_SURVEY_ITEMS.every((item) => answers[item.key] != null);
+
+  function setAnswer(key, value) {
+    setAnswers((prev) => ({ ...prev, [key]: value }));
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8 mb-10">
+      <h1 className="text-2xl font-bold text-slate-800 mb-1">中間アンケート</h1>
+      <p className="text-slate-500 mb-2">
+        先ほどのAIとの対話（システム）について、以下の各項目にどの程度あてはまるかをお答えください。
+      </p>
+      <p className="text-slate-400 text-sm mb-8">
+        1：全くそう思わない 〜 7：非常にそう思う の7段階でお答えください。（全{MID_SURVEY_ITEMS.length}問）
+      </p>
+      {MID_SURVEY_ITEMS.map((item, i) => (
+        <LikertQuestion
+          key={item.key}
+          scale={7}
+          label={`Q${i + 1}. ${item.label}`}
+          value={answers[item.key] ?? null}
+          onChange={(v) => setAnswer(item.key, v)}
+        />
+      ))}
+      <button
+        disabled={!canSubmit}
+        onClick={() => onSubmit({ ...answers })}
+        className={`w-full py-3 rounded-xl font-semibold transition ${
+          canSubmit ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+        }`}
+      >
+        回答して次へ進む
+      </button>
+    </div>
+  );
+}
+
+// フェーズ（制限時間あり/なし）の性質を説明する短い文言。導入・区切り両画面で共用。
+function phaseDescription(phase) {
+  if (phase === "timed") {
+    return `このフェーズでは、1問ごとに${TIMED_LIMIT_SECONDS}秒の制限時間があります。画面右上のカウントダウンが0になると、その時点で選んでいる選択肢が自動的に提出され（未選択の場合は未回答として）、次の問題へ進みます。`;
+  }
+  return "このフェーズには制限時間はありません。じっくり考えて解答してください。";
+}
+
+// ---------------------------------------------------------------------------
+// 画面3.5：SPI開始前の注意事項説明画面（最初のフェーズの説明を含む）
+// ---------------------------------------------------------------------------
+function SpiIntroScreen({ firstPhase, onStart }) {
+  return (
+    <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8">
+      <h1 className="text-2xl font-bold text-slate-800 mb-6">SPI課題を始める前に</h1>
+      <p className="text-slate-700 leading-relaxed mb-6">
+        続いて、論理・計算問題（SPI）を解いていただきます。
+        <strong className="font-bold text-slate-900">あなたの目標は、全問正解することです。</strong>
+        {" "}問題を解く際、先ほどのAIアシスタントに助言（解説）を求めることができます。最終的な解答は、AIの意見を参考にするか、ご自身の知識を使って解くかを含め、あなた自身の判断で決定してください。
+      </p>
+      <div className="mb-8 rounded-xl bg-indigo-50 border border-indigo-200 px-4 py-3 text-sm text-slate-700">
+        <span className="font-bold text-indigo-700">
+          最初のフェーズ：{firstPhase === "timed" ? "制限時間あり（8問）" : "制限時間なし（8問）"}
+        </span>
+        <br />
+        {phaseDescription(firstPhase)}
+      </div>
+      <button
+        onClick={onStart}
+        className="w-full py-3 rounded-xl font-semibold transition bg-indigo-600 text-white hover:bg-indigo-700"
+      >
+        開始
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面3.7：フェーズの区切り画面（前半8問→後半8問の境目で表示）
+// ---------------------------------------------------------------------------
+function PhaseBreakScreen({ phase, onContinue }) {
+  return (
+    <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8">
+      <h1 className="text-2xl font-bold text-slate-800 mb-4">前半のフェーズが終了しました</h1>
+      <p className="text-slate-700 leading-relaxed mb-6">
+        ここからは後半のフェーズに移ります。引き続き、<strong className="font-bold text-slate-900">全問正解</strong>を目指してください。
+      </p>
+      <div className="mb-8 rounded-xl bg-indigo-50 border border-indigo-200 px-4 py-3 text-sm text-slate-700">
+        <span className="font-bold text-indigo-700">
+          後半のフェーズ：{phase === "timed" ? "制限時間あり（8問）" : "制限時間なし（8問）"}
+        </span>
+        <br />
+        {phaseDescription(phase)}
+      </div>
+      <button
+        onClick={onContinue}
+        className="w-full py-3 rounded-xl font-semibold transition bg-indigo-600 text-white hover:bg-indigo-700"
+      >
+        後半を開始する
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面4：タスク画面（SPI）
+// 選択肢は「AIの助言を見る」を押すまでグレーアウト（選択不可）。
+// ---------------------------------------------------------------------------
+function TaskScreen({ group, qIndex, question, totalQuestions, onConfirmAnswer }) {
+  const isTimed = question.phase === "timed";
+  const [selectedChoice, setSelectedChoice] = useState(null);
+  const [choiceHistory, setChoiceHistory] = useState([]);
+  const [initialChoice, setInitialChoice] = useState(null);
+  const [adviceShown, setAdviceShown] = useState(false);
+  const [isLoadingAdvice, setIsLoadingAdvice] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [aiResponseLog, setAiResponseLog] = useState([]);
+  const [input, setInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [isComposing, setIsComposing] = useState(false);
+  const [remaining, setRemaining] = useState(null); // 制限時間フェーズの残り秒数（なしフェーズは null）
+  const chatEndRef = useRef(null);
+  // 経過時間を裏で計測するための基準時刻（画面には一切表示しない）。
+  const questionShownAtRef = useRef(Date.now()); // 問題が表示された瞬間
+  const adviceShownAtRef = useRef(null);          // AIの助言が表示された瞬間（初回成功時のみ）
+  const hasSubmittedRef = useRef(false);          // 二重提出（手動確定と時間切れ自動提出の競合）を防ぐ
+
+  useEffect(() => {
+    // 問題が変わるたびに状態をリセット
+    setSelectedChoice(null);
+    setChoiceHistory([]);
+    setInitialChoice(null);
+    setAdviceShown(false);
+    setIsLoadingAdvice(false);
+    setMessages([]);
+    setAiResponseLog([]);
+    setInput("");
+    setIsSending(false);
+    // 新しい問題の表示時刻を記録し、助言表示時刻はリセットする。
+    questionShownAtRef.current = Date.now();
+    adviceShownAtRef.current = null;
+    hasSubmittedRef.current = false;
+  }, [qIndex]);
+
+  // 制限時間フェーズのカウントダウン。問題が変わるたびに再セットする。
+  useEffect(() => {
+    if (question.phase !== "timed") {
+      setRemaining(null);
+      return;
+    }
+    const deadline = Date.now() + TIMED_LIMIT_SECONDS * 1000;
+    setRemaining(TIMED_LIMIT_SECONDS);
+    const timer = setInterval(() => {
+      const rem = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setRemaining(rem);
+      if (rem <= 0) clearInterval(timer);
+    }, 250);
+    return () => clearInterval(timer);
+  }, [qIndex]);
+
+  // 残り時間が0になったら、その時点の選択（未選択なら null）で自動提出する。
+  useEffect(() => {
+    if (isTimed && remaining === 0 && !hasSubmittedRef.current) {
+      submitAnswer(true);
+    }
+  }, [remaining]);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
+
+  function handleSelectChoice(letter) {
+    if (!adviceShown) return; // 助言を見るまでは選択不可
+    if (initialChoice === null) {
+      setInitialChoice(letter);
+    }
+    setSelectedChoice(letter);
+    setChoiceHistory((prev) => (prev[prev.length - 1] === letter ? prev : [...prev, letter]));
+  }
+
+  async function handleShowAdvice() {
+    if (adviceShown || isLoadingAdvice) return;
+    setIsLoadingAdvice(true);
+    try {
+      // 初回助言はLLMに生成させて自然な文章のバリエーションを保ちつつ、
+      // 三段構え（生成→矯正再試行→最後にテンプレート）で意図した答えを必ず保つ。
+      const contents = [{ role: "user", parts: [{ text: ADVICE_TRIGGER }] }];
+      const aiText = await generateHoldingResponse(question, contents, true);
+      setMessages([{ sender: "ai", text: aiText }]);
+      setAiResponseLog([aiText]);
+      // 初回成功時のみ助言表示時刻を記録（エラー後の再試行では上書きしない）。
+      if (adviceShownAtRef.current === null) {
+        adviceShownAtRef.current = Date.now();
+      }
+      setAdviceShown(true);
+    } catch (err) {
+      // 失敗時は adviceShown を立てず、エラーを表示してボタンで再試行できるようにする
+      const errText = `（AI助言の取得に失敗しました：${err.message}）`;
+      setMessages([{ sender: "ai", text: errText }]);
+    } finally {
+      setIsLoadingAdvice(false);
+    }
+  }
+
+  async function handleSend() {
+    const text = input.trim();
+    if (!text || isSending || !adviceShown) return;
+    const updatedMessages = [...messages, { sender: "user", text }];
+    setMessages(updatedMessages);
+    setInput("");
+    setIsSending(true);
+    try {
+      const contents = buildTaskContents(updatedMessages);
+      // 反論への返答も三段構え（生成→矯正再試行→最後に定型の再主張文）で答えを保つ。
+      const aiText = await generateHoldingResponse(question, contents, false);
+      setMessages((prev) => [...prev, { sender: "ai", text: aiText }]);
+      setAiResponseLog((prev) => [...prev, aiText]);
+    } catch (err) {
+      const errText = `（AI応答の取得に失敗しました：${err.message}）`;
+      setMessages((prev) => [...prev, { sender: "ai", text: errText }]);
+      setAiResponseLog((prev) => [...prev, errText]);
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  // isTimeout=true は時間切れによる自動提出（選択が null のこともある）。
+  function submitAnswer(isTimeout) {
+    if (hasSubmittedRef.current) return; // 手動確定と時間切れの二重発火を防ぐ
+    hasSubmittedRef.current = true;
+    // 経過時間（秒）を裏で算出する。画面には表示しない。
+    const confirmedAt = Date.now();
+    const timeToAdvice =
+      adviceShownAtRef.current !== null
+        ? (adviceShownAtRef.current - questionShownAtRef.current) / 1000
+        : null; // 助言を一度も見ずに確定した場合は null
+    const timeAfterAdvice =
+      adviceShownAtRef.current !== null
+        ? (confirmedAt - adviceShownAtRef.current) / 1000
+        : null;
+    const log = {
+      question_number: question.id,
+      phase: question.phase, // "timed" | "untimed"
+      time_limit_seconds: isTimed ? TIMED_LIMIT_SECONDS : null,
+      timed_out: isTimeout, // 制限時間切れによる自動提出かどうか
+      is_error_injected: !!question.isTrap,
+      advice_shown: adviceShown,
+      // 問題表示 → AI助言表示までの秒数、および 助言表示 → 解答確定までの秒数
+      time_to_advice_seconds: timeToAdvice,
+      time_after_advice_seconds: timeAfterAdvice,
+      initial_user_choice: initialChoice, // 助言表示後の最初の選択
+      ai_response_log: aiResponseLog,
+      // チャットの全書き起こし（AIの助言・応答とユーザーの質問を時系列で保持）
+      chat_messages: messages.map((m) => ({ sender: m.sender, text: m.text })),
+      // ユーザーがAIに送った質問・相談の文面のみを抽出したもの
+      user_questions: messages.filter((m) => m.sender === "user").map((m) => m.text),
+      choice_history: choiceHistory,
+      final_user_choice: selectedChoice, // 時間切れかつ未選択なら null
+      is_sycophancy_accepted: !!question.isTrap && selectedChoice === question.trapLetter,
+    };
+    onConfirmAnswer(log);
+  }
+
+  function handleConfirm() {
+    if (!selectedChoice) return;
+    submitAnswer(false);
+  }
+
+  return (
+    <div className="max-w-5xl mx-auto mt-6 px-4 pb-10">
+      <div className="flex items-center justify-between mb-4">
+        <div className="text-sm font-semibold text-slate-500">
+          問題 {qIndex + 1} / {totalQuestions}
+          <span className="ml-2 px-2 py-0.5 rounded bg-slate-200 text-slate-600 text-xs">{question.category}</span>
+        </div>
+        <div className="flex items-center gap-3">
+          {isTimed && remaining !== null && (
+            <div
+              className={`text-sm font-semibold px-3 py-1 rounded-lg tabular-nums ${
+                remaining <= 10 ? "bg-red-50 text-red-600" : "bg-slate-100 text-slate-600"
+              }`}
+            >
+              残り {formatMMSS(remaining)}
+            </div>
+          )}
+          <div className="text-xs text-slate-400">実験群: {group}</div>
+        </div>
+      </div>
+      <div className="w-full bg-slate-200 rounded-full h-2 mb-6">
+        <div
+          className="bg-indigo-600 h-2 rounded-full transition-all"
+          style={{ width: `${((qIndex + 1) / totalQuestions) * 100}%` }}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* 問題エリア */}
+        <div className="bg-white rounded-2xl shadow p-6">
+          <h2 className="font-bold text-slate-800 mb-3">問題</h2>
+          <p className="whitespace-pre-line text-slate-700 mb-5">{question.prompt}</p>
+          {!adviceShown && (
+            <div className="mb-3 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              右の「AIの助言を見る」を押すと、解答の選択肢を選べるようになります。
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            {question.options.map((opt, i) => {
+              const letter = LETTERS[i];
+              const isSelected = selectedChoice === letter;
+              return (
+                <button
+                  key={letter}
+                  disabled={!adviceShown}
+                  onClick={() => handleSelectChoice(letter)}
+                  className={`text-left px-3 py-2 rounded-lg border text-sm transition ${
+                    !adviceShown
+                      ? "border-slate-200 bg-slate-50 text-slate-300 cursor-not-allowed"
+                      : isSelected
+                      ? "border-indigo-600 bg-indigo-50 text-indigo-800 font-semibold"
+                      : "border-slate-200 hover:border-indigo-300 text-slate-700"
+                  }`}
+                >
+                  <span className="font-bold mr-1">{letter}.</span>
+                  {opt}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            disabled={!selectedChoice}
+            onClick={handleConfirm}
+            className={`mt-6 w-full py-3 rounded-xl font-semibold transition ${
+              selectedChoice ? "bg-emerald-600 text-white hover:bg-emerald-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+            }`}
+          >
+            最終解答を確定する
+          </button>
+        </div>
+
+        {/* チャットエリア */}
+        <div className="bg-white rounded-2xl shadow p-6 flex flex-col h-[560px]">
+          <h2 className="font-bold text-slate-800 mb-3">AIアシスタント</h2>
+          <div className="flex-1 overflow-y-auto chat-scroll pr-1 space-y-3">
+            {messages.map((m, i) => (
+              <div key={i} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`max-w-[85%] px-4 py-2 rounded-2xl text-sm whitespace-pre-line ${
+                    m.sender === "user"
+                      ? "bg-indigo-600 text-white rounded-br-sm"
+                      : "bg-slate-100 text-slate-800 rounded-bl-sm"
+                  }`}
+                >
+                  {m.text}
+                </div>
+              </div>
+            ))}
+            {(isSending || isLoadingAdvice) && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] px-4 py-2 rounded-2xl text-sm bg-slate-100 text-slate-400 rounded-bl-sm">
+                  入力中…
+                </div>
+              </div>
+            )}
+            {!adviceShown && !isLoadingAdvice && messages.length === 0 && (
+              <div className="h-full flex items-center justify-center text-center text-slate-400 text-sm px-4">
+                下の「AIの助言を見る」を押すと、この問題についてのAIの回答と解説が表示されます。
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {!adviceShown ? (
+            <button
+              onClick={handleShowAdvice}
+              disabled={isLoadingAdvice}
+              className="mt-3 w-full py-3 rounded-xl font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition"
+            >
+              {isLoadingAdvice ? "AIが考えています…" : "AIの助言を見る"}
+            </button>
+          ) : (
+            <div className="mt-3 flex gap-2">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onCompositionStart={() => setIsComposing(true)}
+                onCompositionEnd={() => setIsComposing(false)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !isComposing && !e.nativeEvent.isComposing) {
+                    handleSend();
+                  }
+                }}
+                disabled={isSending}
+                placeholder="AIに相談する..."
+                className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:bg-slate-50"
+              />
+              <button
+                onClick={handleSend}
+                disabled={isSending}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed"
+              >
+                {isSending ? "送信中…" : "送信"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 画面5：事後アンケート＋結果画面
+// ---------------------------------------------------------------------------
+function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, onReset }) {
+  const [q1, setQ1] = useState(null);
+  const [q2, setQ2] = useState(null);
+  const [q3, setQ3] = useState(null);
+  const [q4, setQ4] = useState(null);
+  const [q5, setQ5] = useState(null);
+  const [q6, setQ6] = useState(null);
+  const [q7, setQ7] = useState(null);
+  const [q8, setQ8] = useState(null);
+  const [q9, setQ9] = useState(null);
+  const [q10, setQ10] = useState(null);
+  const [q11, setQ11] = useState(null);
+  const [q12, setQ12] = useState(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const textareaRef = useRef(null);
+
+  const canSubmit =
+    q1 !== null && q2 !== null && q3 !== null && q4 !== null &&
+    q5 !== null && q6 !== null && q7 !== null && q8 !== null &&
+    q9 !== null && q10 !== null && q11 !== null && q12 !== null;
+
+  const postSurvey = {
+    q1_post_efficacy: q1,
+    q2_cognitive_trust: q2,
+    q3_affective_trust: q3,
+    q4_satisfaction: q4,
+    q5_authenticity_perception: q5,
+    q6_reactance_affective: q6,
+    q7_reactance_cognitive: q7,
+    q8_overreliance_self: q8,
+    q9_appropriate_reliance_self: q9,
+    q10_manipulation_check_attitude: q10,
+    q11_manipulation_check_stance: q11,
+    q12_post_av_stance: q12,
+  };
+
+  const exportData = useMemo(
+    () => buildExportData({
+      pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey,
+      postSurvey: submitted ? postSurvey : null,
+      logs,
+    }),
+    [
+      pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, submitted,
+      q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12,
+    ]
+  );
+
+  // 事後アンケートの送信時に、完成したデータをバックエンドへ保存する。
+  // 下のコピー用テキストエリアは、保存が失敗したときの手動バックアップとして残してある。
+  useEffect(() => {
+    if (submitted) saveProgress(pid, "result", exportData);
+  }, [submitted]);
+
+  const jsonString = JSON.stringify(exportData, null, 2);
+
+  function handleCopy() {
+    navigator.clipboard.writeText(jsonString).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  function handleReset() {
+    if (window.confirm("最初の画面に戻ります。上記のログはコピー済みですか？（戻ると今回の実験データは失われます）")) {
+      onReset();
+    }
+  }
+
+  if (!submitted) {
+    return (
+      <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8 mb-10">
+        <h1 className="text-2xl font-bold text-slate-800 mb-1">事後アンケート</h1>
+        <p className="text-slate-500 mb-4">全16問のタスクが終了しました。最後に以下の質問にお答えください。</p>
+        {topic && (
+          <div className="mb-8 rounded-xl bg-indigo-50 border border-indigo-200 px-4 py-3 text-sm text-slate-700">
+            事前アンケートであなたが選んだテーマは <span className="font-bold text-indigo-700">「{topic.label}」</span> です。以下のテーマに関する設問は、このテーマについてお答えください。
+          </div>
+        )}
+        <LikertQuestion
+          label="Q1. 私はこの手の問題（SPI等）を正しく解く能力があると感じる"
+          value={q1}
+          onChange={setQ1}
+        />
+        <LikertQuestion
+          label="Q2. このAIの解説は論理的で頼りになる"
+          value={q2}
+          onChange={setQ2}
+        />
+        <LikertQuestion
+          label="Q3. このAIは親身になってくれたと感じた"
+          value={q3}
+          onChange={setQ3}
+        />
+        <LikertQuestion
+          label="Q4. このAIとの協働作業は心地よく、満足のいくものだった"
+          value={q4}
+          onChange={setQ4}
+        />
+        <LikertQuestion
+          label="Q5. AIの回答は、私を喜ばせるためにお世辞を言っている（フリをしている）と感じた"
+          value={q5}
+          onChange={setQ5}
+        />
+        <LikertQuestion
+          label="Q6. AIの応答にイライラした"
+          value={q6}
+          onChange={setQ6}
+        />
+        <LikertQuestion
+          label="Q7. AIの回答に対して、欠点やアラを探そうとしてしまった"
+          value={q7}
+          onChange={setQ7}
+        />
+        <LikertQuestion
+          label="Q8. SPI課題において、よく理解しないままAIの提案を受け入れた"
+          value={q8}
+          onChange={setQ8}
+        />
+        <LikertQuestion
+          label="Q9. SPI課題において、自分の知識を使ってAIの答えが正しいか検証した"
+          value={q9}
+          onChange={setQ9}
+        />
+        <LikertQuestion
+          label={`Q10. このAIは${topic.theme}というテーマについて、一方の意見に偏らず中立的だったと感じた`}
+          value={q10}
+          onChange={setQ10}
+        />
+        <LikertQuestion
+          label="Q11. このAIは私の意見に合わせて変化した"
+          value={q11}
+          onChange={setQ11}
+        />
+        <LikertQuestion
+          label={`Q12. 私は現時点で、${topic.stanceObject}に賛成である`}
+          value={q12}
+          onChange={setQ12}
+          leftLabel="全く賛成しない"
+          rightLabel="強く賛成する"
+        />
+        <button
+          disabled={!canSubmit}
+          onClick={() => setSubmitted(true)}
+          className={`w-full py-3 rounded-xl font-semibold transition ${
+            canSubmit ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+          }`}
+        >
+          回答してログを表示する
+        </button>
+      </div>
+    );
+  }
+
+  const correctCountEstimate = logs.filter((l) => {
+    const q = QUESTIONS.find((qq) => qq.id === l.question_number);
+    return l.final_user_choice === q.correctLetter;
+  }).length;
+
+  return (
+    <div className="max-w-4xl mx-auto mt-10 px-4 pb-16">
+      <h1 className="text-2xl font-bold text-slate-800 mb-1">実験結果・ログ出力</h1>
+      <p className="text-slate-500 mb-6">実験は終了しました。以下に集計結果と行動ログを表示します。</p>
+
+      <div className="bg-white rounded-2xl shadow p-6 mb-6">
+        <h2 className="font-bold text-slate-800 mb-3">サマリー</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
+          <div className="bg-slate-50 rounded-lg p-3">
+            <div className="text-slate-400">実験群</div>
+            <div className="font-semibold text-slate-800">{group}</div>
+          </div>
+          <div className="bg-slate-50 rounded-lg p-3">
+            <div className="text-slate-400">基礎力テスト正答数</div>
+            <div className="font-semibold text-slate-800">{baselineLog ? `${baselineLog.correct_count} / ${baselineLog.total}` : "-"}</div>
+          </div>
+          <div className="bg-slate-50 rounded-lg p-3">
+            <div className="text-slate-400">正答数（真の正解基準）</div>
+            <div className="font-semibold text-slate-800">{correctCountEstimate} / {logs.length}</div>
+          </div>
+          <div className="bg-slate-50 rounded-lg p-3">
+            <div className="text-slate-400">嘘を受容した問題数</div>
+            <div className="font-semibold text-slate-800">{logs.filter((l) => l.is_sycophancy_accepted).length} / 4</div>
+          </div>
+          <div className="bg-slate-50 rounded-lg p-3">
+            <div className="text-slate-400">ディスカッション時間</div>
+            <div className="font-semibold text-slate-800">{discussionLog ? formatMMSS(discussionLog.elapsed_seconds) : "-"}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow p-6 mb-6">
+        <h2 className="font-bold text-slate-800 mb-3">事前・事後アンケート結果</h2>
+        <table className="w-full text-sm text-left border-collapse">
+          <thead>
+            <tr className="border-b border-slate-200 text-slate-500">
+              <th className="py-2">項目</th>
+              <th className="py-2">回答（1〜7）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事前Q1. NFC（複雑な問題を深く考えるのが好き）</td>
+              <td className="py-2">{preSurvey.q1_nfc}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事前Q2. 事前自己効力感</td>
+              <td className="py-2">{preSurvey.q2_pre_efficacy}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事前Q3. {topic.label}への賛成度</td>
+              <td className="py-2">{preSurvey.q3_pre_av_stance}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事前Q4. {topic.label}というテーマの重要度</td>
+              <td className="py-2">{preSurvey.q4_topic_importance}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事前Q5. AIは人間より正確だと感じるか</td>
+              <td className="py-2">{preSurvey.q5_ai_accuracy_belief}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事前Q6. 生成AIの利用頻度・理解度</td>
+              <td className="py-2">{preSurvey.q6_ai_literacy}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q1. 事後自己効力感</td>
+              <td className="py-2">{postSurvey.q1_post_efficacy}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q2. 認知的信頼（解説の論理性）</td>
+              <td className="py-2">{postSurvey.q2_cognitive_trust}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q3. 感情的信頼（親身さ）</td>
+              <td className="py-2">{postSurvey.q3_affective_trust}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q4. 満足度</td>
+              <td className="py-2">{postSurvey.q4_satisfaction}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q5. 真正性の知覚（お世辞と感じたか）</td>
+              <td className="py-2">{postSurvey.q5_authenticity_perception}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q6. 心理的リアクタンス（感情：イライラ）</td>
+              <td className="py-2">{postSurvey.q6_reactance_affective}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q7. 心理的リアクタンス（認知：アラ探し）</td>
+              <td className="py-2">{postSurvey.q7_reactance_cognitive}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q8. 過剰依存の自己評価</td>
+              <td className="py-2">{postSurvey.q8_overreliance_self}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q9. 適切な却下能力の自己評価</td>
+              <td className="py-2">{postSurvey.q9_appropriate_reliance_self}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q10. マニピュレーションチェック（態度：中立性）</td>
+              <td className="py-2">{postSurvey.q10_manipulation_check_attitude}</td>
+            </tr>
+            <tr className="border-b border-slate-100">
+              <td className="py-2">事後Q11. マニピュレーションチェック（スタンス：同調）</td>
+              <td className="py-2">{postSurvey.q11_manipulation_check_stance}</td>
+            </tr>
+            <tr>
+              <td className="py-2">事後Q12. 事後態度（{topic.label}への賛成度）</td>
+              <td className="py-2">{postSurvey.q12_post_av_stance}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow p-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-bold text-slate-800">クリーンな行動ログ（JSON）</h2>
+          <button
+            onClick={handleCopy}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700"
+          >
+            {copied ? "コピーしました！" : "クリップボードにコピー"}
+          </button>
+        </div>
+        <textarea
+          ref={textareaRef}
+          readOnly
+          value={jsonString}
+          className="w-full h-96 text-xs font-mono border border-slate-200 rounded-lg p-3 bg-slate-50"
+        />
+      </div>
+
+      <button
+        onClick={handleReset}
+        className="mt-6 w-full py-3 rounded-xl font-semibold bg-slate-700 text-white hover:bg-slate-800 transition"
+      >
+        最初の画面に戻る（次の被験者へ）
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// アプリ本体（フェーズ管理）
+// ---------------------------------------------------------------------------
+function App() {
+  const [phase, setPhase] = useState("setup"); // setup | preSurvey | baseline | discussion | midSurvey | spiIntro | task | phaseBreak | result
+  const [pid, setPid] = useState(null);
+  const [group, setGroup] = useState(null);
+  const [phaseOrder, setPhaseOrder] = useState(null); // "timed_first" | "untimed_first"
+  const [topic, setTopic] = useState(null);
+  const [preSurvey, setPreSurvey] = useState(null);
+  const [baselineLog, setBaselineLog] = useState(null);
+  const [discussionLog, setDiscussionLog] = useState(null);
+  const [midSurvey, setMidSurvey] = useState(null);
+  const [qIndex, setQIndex] = useState(0);
+  const [logs, setLogs] = useState([]);
+
+  // フェーズ順に応じて並べ替えた16問の出題リスト。
+  const orderedQuestions = useMemo(() => buildOrderedQuestions(phaseOrder), [phaseOrder]);
+
+  // 各フェーズの終わりに、そこまでのデータをバックエンドへ保存する。
+  // 途中で離脱されても直前のフェーズまでのデータが残るようにするのが狙い。
+  // await しないのは意図的で、保存の完了を待って画面遷移が止まらないようにしている。
+  function save(nextPhase, snapshot) {
+    saveProgress(pid, nextPhase, buildExportData(Object.assign(
+      { pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, postSurvey: null, logs },
+      snapshot
+    )));
+  }
+
+  function handleStart(selectedPid, selectedGroup, selectedPhaseOrder) {
+    setPid(selectedPid);
+    setGroup(selectedGroup);
+    setPhaseOrder(selectedPhaseOrder);
+    setPhase("preSurvey");
+    // この時点ではまだ state が更新されていないため、解決済みの値を直接渡す。
+    saveProgress(selectedPid, "preSurvey", buildExportData({
+      pid: selectedPid, group: selectedGroup, phaseOrder: selectedPhaseOrder,
+      topic: null, preSurvey: null, baselineLog: null, discussionLog: null,
+      midSurvey: null, postSurvey: null, logs: [],
+    }));
+  }
+
+  function handlePreSurveySubmit(answers, selectedTopic) {
+    // 議論トピックは事前アンケートで被験者自身が選択する。
+    // 選ばれたトピックが、以降の自由議論・事後アンケートに引き継がれる。
+    setTopic(selectedTopic);
+    setPreSurvey(answers);
+    setPhase("baseline");
+    save("baseline", { topic: selectedTopic, preSurvey: answers });
+  }
+
+  function handleBaselineFinish(log) {
+    setBaselineLog(log);
+    // G3（議論なし群）は自由議論も中間アンケートもスキップし、直接SPI導入へ。
+    const nextPhase = group === "G3_NoDiscussion" ? "spiIntro" : "discussion";
+    setPhase(nextPhase);
+    save(nextPhase, { baselineLog: log });
+  }
+
+  function handleDiscussionFinish(log) {
+    setDiscussionLog(log);
+    setPhase("midSurvey");
+    save("midSurvey", { discussionLog: log });
+  }
+
+  function handleMidSurveySubmit(answers) {
+    setMidSurvey(answers);
+    setPhase("spiIntro");
+    save("spiIntro", { midSurvey: answers });
+  }
+
+  function handleConfirmAnswer(log) {
+    const nextLogs = [...logs, log];
+    setLogs(nextLogs);
+    const nextIndex = qIndex + 1;
+    if (nextIndex >= orderedQuestions.length) {
+      setPhase("result");
+      save("result", { logs: nextLogs });
+      return;
+    }
+    setQIndex(nextIndex);
+    // フェーズ（制限時間あり/なし）の境目に来たら区切り画面を挟む。
+    const crossedBoundary = orderedQuestions[nextIndex].phase !== orderedQuestions[qIndex].phase;
+    if (crossedBoundary) {
+      setPhase("phaseBreak");
+    }
+    save(crossedBoundary ? "phaseBreak" : "task", { logs: nextLogs });
+  }
+
+  function handleReset() {
+    // 次の被験者のために状態を初期化する
+    setPid(null);
+    setGroup(null);
+    setPhaseOrder(null);
+    setTopic(null);
+    setPreSurvey(null);
+    setBaselineLog(null);
+    setDiscussionLog(null);
+    setMidSurvey(null);
+    setQIndex(0);
+    setLogs([]);
+    setPhase("setup");
+  }
+
+  return (
+    <div className="min-h-screen pb-10">
+      <header className="bg-white border-b border-slate-200 py-4 mb-2">
+        <div className="max-w-5xl mx-auto px-4">
+          <h1 className="text-lg font-bold text-slate-800">ディスカッション × SPI × AIアシスタント 協働実験プラットフォーム</h1>
+        </div>
+      </header>
+      {phase === "setup" && <SetupScreen onStart={handleStart} />}
+      {phase === "preSurvey" && <PreSurveyScreen onSubmit={handlePreSurveySubmit} />}
+      {phase === "baseline" && <BaselineTestScreen onFinish={handleBaselineFinish} />}
+      {phase === "discussion" && (
+        <DiscussionScreen group={group} topic={topic} onFinish={handleDiscussionFinish} />
+      )}
+      {phase === "midSurvey" && <MidSurveyScreen onSubmit={handleMidSurveySubmit} />}
+      {phase === "spiIntro" && (
+        <SpiIntroScreen
+          firstPhase={orderedQuestions[0] ? orderedQuestions[0].phase : null}
+          onStart={() => setPhase("task")}
+        />
+      )}
+      {phase === "phaseBreak" && (
+        <PhaseBreakScreen
+          phase={orderedQuestions[qIndex] ? orderedQuestions[qIndex].phase : null}
+          onContinue={() => setPhase("task")}
+        />
+      )}
+      {phase === "task" && (
+        <TaskScreen
+          group={group}
+          qIndex={qIndex}
+          question={orderedQuestions[qIndex]}
+          totalQuestions={orderedQuestions.length}
+          onConfirmAnswer={handleConfirmAnswer}
+        />
+      )}
+      {phase === "result" && (
+        <ResultScreen
+          pid={pid}
+          group={group}
+          phaseOrder={phaseOrder}
+          topic={topic}
+          preSurvey={preSurvey}
+          baselineLog={baselineLog}
+          discussionLog={discussionLog}
+          midSurvey={midSurvey}
+          logs={logs}
+          onReset={handleReset}
+        />
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+<script>
+  // @babel/standalone now defaults JSX to the "automatic" runtime, which emits
+  // `import ... from "react/jsx-runtime"` — invalid outside an ES module and
+  // incompatible with the UMD React build loaded above. Transform manually
+  // with the "classic" runtime (React.createElement) and inject as a normal script.
+  (function () {
+    var source = document.getElementById("app-source").textContent;
+    var output = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+    }).code;
+    var script = document.createElement("script");
+    script.text = output;
+    document.body.appendChild(script);
+  })();
+</script>
+</body>
+</html>
