@@ -1460,6 +1460,7 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   const [q12, setQ12] = useState(null);
   const [submitted, setSubmitted] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("saving"); // saving | saved | error
   const textareaRef = useRef(null);
 
   const canSubmit =
@@ -1495,12 +1496,28 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   );
 
   // 事後アンケートの送信時に、完成したデータをバックエンドへ保存する。
-  // 下のコピー用テキストエリアは、保存が失敗したときの手動バックアップとして残してある。
+  // ここでは fire-and-forget にせず結果を待ち、成否を saveStatus に反映して
+  // 最終画面に表示する。こうすることで「保存完了」を被験者が確認するまで
+  // 自然にページに留まり、保存前の離脱でデータが欠ける事故を防ぐ。
+  // 保存に失敗した場合のみ、研究者用のバックアップ（JSON）を最終画面に出す。
   useEffect(() => {
-    if (submitted) saveProgress(pid, "result", exportData);
+    if (!submitted) return;
+    let cancelled = false;
+    setSaveStatus("saving");
+    callBackend("save", { pid, phase: "result", data: exportData })
+      .then(() => { if (!cancelled) setSaveStatus("saved"); })
+      .catch(() => { if (!cancelled) setSaveStatus("error"); });
+    return () => { cancelled = true; };
   }, [submitted]);
 
   const jsonString = JSON.stringify(exportData, null, 2);
+
+  function retrySave() {
+    setSaveStatus("saving");
+    callBackend("save", { pid, phase: "result", data: exportData })
+      .then(() => setSaveStatus("saved"))
+      .catch(() => setSaveStatus("error"));
+  }
 
   function handleCopy() {
     navigator.clipboard.writeText(jsonString).then(() => {
@@ -1510,7 +1527,7 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   }
 
   function handleReset() {
-    if (window.confirm("最初の画面に戻ります。上記のログはコピー済みですか？（戻ると今回の実験データは失われます）")) {
+    if (window.confirm("最初の画面に戻ります。よろしいですか？（この画面の表示は消えます。回答データはすでに保存済みです）")) {
       onReset();
     }
   }
@@ -1600,151 +1617,65 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
     );
   }
 
-  const correctCountEstimate = logs.filter((l) => {
-    const q = QUESTIONS.find((qq) => qq.id === l.question_number);
-    return l.final_user_choice === q.correctLetter;
-  }).length;
-
   return (
-    <div className="max-w-4xl mx-auto mt-10 px-4 pb-16">
-      <h1 className="text-2xl font-bold text-slate-800 mb-1">実験結果・ログ出力</h1>
-      <p className="text-slate-500 mb-6">実験は終了しました。以下に集計結果と行動ログを表示します。</p>
+    <div className="max-w-xl mx-auto mt-24 px-4 pb-16 text-center">
+      <div className="bg-white rounded-2xl shadow-xl p-10">
+        <div className="text-5xl mb-4">🎉</div>
+        <h1 className="text-2xl font-bold text-slate-800 mb-3">ご協力ありがとうございました</h1>
+        <p className="text-slate-500 mb-8 leading-relaxed">
+          実験は以上で終了です。<br />ご協力に心より感謝いたします。
+        </p>
 
-      <div className="bg-white rounded-2xl shadow p-6 mb-6">
-        <h2 className="font-bold text-slate-800 mb-3">サマリー</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
-          <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-400">実験群</div>
-            <div className="font-semibold text-slate-800">{group}</div>
+        {saveStatus === "saving" && (
+          <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm text-slate-600">
+            回答を保存しています。この画面のまま少しお待ちください…
           </div>
-          <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-400">基礎力テスト正答数</div>
-            <div className="font-semibold text-slate-800">{baselineLog ? `${baselineLog.correct_count} / ${baselineLog.total}` : "-"}</div>
+        )}
+        {saveStatus === "saved" && (
+          <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-sm font-semibold text-emerald-800">
+            ✓ 回答を保存しました。ブラウザを閉じていただいて構いません。
           </div>
-          <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-400">正答数（真の正解基準）</div>
-            <div className="font-semibold text-slate-800">{correctCountEstimate} / {logs.length}</div>
+        )}
+        {saveStatus === "error" && (
+          <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-4 text-sm text-red-800 text-left">
+            <p className="font-semibold mb-2">⚠ 回答の保存に失敗しました。</p>
+            <p className="mb-3">お手数ですが、下のボタンをもう一度押すか、実験担当者にお知らせください。</p>
+            <button
+              onClick={retrySave}
+              className="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-semibold hover:bg-red-700"
+            >
+              もう一度保存する
+            </button>
           </div>
-          <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-400">嘘を受容した問題数</div>
-            <div className="font-semibold text-slate-800">{logs.filter((l) => l.is_sycophancy_accepted).length} / 4</div>
+        )}
+      </div>
+
+      {/* 研究者用: 保存に失敗したときだけ表示するバックアップ（手動で回収するためのJSON） */}
+      {saveStatus === "error" && (
+        <div className="bg-white rounded-2xl shadow p-4 mt-4 text-left">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-slate-500">研究者用バックアップ（JSON）</span>
+            <button
+              onClick={handleCopy}
+              className="px-3 py-1 bg-slate-200 text-slate-700 rounded text-xs font-semibold hover:bg-slate-300"
+            >
+              {copied ? "コピーしました" : "コピー"}
+            </button>
           </div>
-          <div className="bg-slate-50 rounded-lg p-3">
-            <div className="text-slate-400">ディスカッション時間</div>
-            <div className="font-semibold text-slate-800">{discussionLog ? formatMMSS(discussionLog.elapsed_seconds) : "-"}</div>
-          </div>
+          <textarea
+            ref={textareaRef}
+            readOnly
+            value={jsonString}
+            className="w-full h-40 text-xs font-mono border border-slate-200 rounded-lg p-2 bg-slate-50"
+          />
         </div>
-      </div>
-
-      <div className="bg-white rounded-2xl shadow p-6 mb-6">
-        <h2 className="font-bold text-slate-800 mb-3">事前・事後アンケート結果</h2>
-        <table className="w-full text-sm text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-200 text-slate-500">
-              <th className="py-2">項目</th>
-              <th className="py-2">回答（1〜7）</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事前Q1. NFC（複雑な問題を深く考えるのが好き）</td>
-              <td className="py-2">{preSurvey.q1_nfc}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事前Q2. 事前自己効力感</td>
-              <td className="py-2">{preSurvey.q2_pre_efficacy}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事前Q3. {topic.label}への賛成度</td>
-              <td className="py-2">{preSurvey.q3_pre_av_stance}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事前Q4. {topic.label}というテーマの重要度</td>
-              <td className="py-2">{preSurvey.q4_topic_importance}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事前Q5. AIは人間より正確だと感じるか</td>
-              <td className="py-2">{preSurvey.q5_ai_accuracy_belief}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事前Q6. 生成AIの利用頻度・理解度</td>
-              <td className="py-2">{preSurvey.q6_ai_literacy}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q1. 事後自己効力感</td>
-              <td className="py-2">{postSurvey.q1_post_efficacy}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q2. 認知的信頼（解説の論理性）</td>
-              <td className="py-2">{postSurvey.q2_cognitive_trust}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q3. 感情的信頼（親身さ）</td>
-              <td className="py-2">{postSurvey.q3_affective_trust}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q4. 満足度</td>
-              <td className="py-2">{postSurvey.q4_satisfaction}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q5. 真正性の知覚（お世辞と感じたか）</td>
-              <td className="py-2">{postSurvey.q5_authenticity_perception}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q6. 心理的リアクタンス（感情：イライラ）</td>
-              <td className="py-2">{postSurvey.q6_reactance_affective}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q7. 心理的リアクタンス（認知：アラ探し）</td>
-              <td className="py-2">{postSurvey.q7_reactance_cognitive}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q8. 過剰依存の自己評価</td>
-              <td className="py-2">{postSurvey.q8_overreliance_self}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q9. 適切な却下能力の自己評価</td>
-              <td className="py-2">{postSurvey.q9_appropriate_reliance_self}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q10. マニピュレーションチェック（態度：中立性）</td>
-              <td className="py-2">{postSurvey.q10_manipulation_check_attitude}</td>
-            </tr>
-            <tr className="border-b border-slate-100">
-              <td className="py-2">事後Q11. マニピュレーションチェック（スタンス：同調）</td>
-              <td className="py-2">{postSurvey.q11_manipulation_check_stance}</td>
-            </tr>
-            <tr>
-              <td className="py-2">事後Q12. 事後態度（{topic.label}への賛成度）</td>
-              <td className="py-2">{postSurvey.q12_post_av_stance}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div className="bg-white rounded-2xl shadow p-6">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="font-bold text-slate-800">クリーンな行動ログ（JSON）</h2>
-          <button
-            onClick={handleCopy}
-            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700"
-          >
-            {copied ? "コピーしました！" : "クリップボードにコピー"}
-          </button>
-        </div>
-        <textarea
-          ref={textareaRef}
-          readOnly
-          value={jsonString}
-          className="w-full h-96 text-xs font-mono border border-slate-200 rounded-lg p-3 bg-slate-50"
-        />
-      </div>
+      )}
 
       <button
         onClick={handleReset}
-        className="mt-6 w-full py-3 rounded-xl font-semibold bg-slate-700 text-white hover:bg-slate-800 transition"
+        className="mt-8 text-xs text-slate-400 underline hover:text-slate-600"
       >
-        最初の画面に戻る（次の被験者へ）
+        （研究者用）最初の画面に戻る
       </button>
     </div>
   );
