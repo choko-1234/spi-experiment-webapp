@@ -601,10 +601,12 @@ function LikertQuestion({ label, value, onChange, leftLabel, rightLabel, scale =
 // ---------------------------------------------------------------------------
 // 画面1：開始確認画面
 //
-// 実験群・出題順は、URLの参加者ID（?pid=...）をもとにバックエンドの割り当て表から
-// 自動的に解決される。研究者が被験者ごとに手作業で選ぶ必要はない。
+// 実験群・出題順は、参加者ID(pid)をもとにバックエンドの割り当て表から自動的に
+// 解決される。研究者が被験者ごとに手作業で選ぶ必要はない。
+// pidはURL（?pid=...）で渡ってくる場合はそれを使い、渡ってきていない場合は
+// 被験者自身に座席番号を入力してもらう（全員が同じ共通URLを開く運用のため）。
 // 割り当てが見つからない場合は、誤った条件で実験を始めてしまわないよう、
-// 手動で選ぶ手段は用意せずエラー表示のみで停止する。
+// 手動で群を選ぶ手段は用意せずエラー表示のみで停止する。
 //
 // 実験群・出題順は解決して onStart に渡すが、被験者には表示しない。
 // 「同調群」等の条件名を見せると需要特性（demand characteristics）となり、
@@ -612,20 +614,18 @@ function LikertQuestion({ label, value, onChange, leftLabel, rightLabel, scale =
 // 研究者が割り当てを確認したい場合は、スプレッドシートの Progress シートを見る。
 // ---------------------------------------------------------------------------
 function SetupScreen({ onStart }) {
-  const [status, setStatus] = useState("loading"); // loading | error | ready
+  const pidFromUrl = new URLSearchParams(window.location.search).get("pid");
+  // input: 座席番号の入力待ち（URLにpidが無いとき）/ loading / error / ready
+  const [status, setStatus] = useState(pidFromUrl ? "loading" : "input");
   const [errorMsg, setErrorMsg] = useState("");
-  const [pid, setPid] = useState(null);
+  const [pid, setPid] = useState(pidFromUrl);
+  const [pidInput, setPidInput] = useState("");
   const [resolved, setResolved] = useState(null); // { group, phase_order }
 
-  useEffect(() => {
-    const pidParam = new URLSearchParams(window.location.search).get("pid");
-    if (!pidParam) {
-      setStatus("error");
-      setErrorMsg("URLに参加者ID（?pid=...）が含まれていません。配布されたURLをもう一度ご確認ください。");
-      return;
-    }
-    setPid(pidParam);
-    resolvePid(pidParam).then((res) => {
+  function attemptResolve(pidValue) {
+    setPid(pidValue);
+    setStatus("loading");
+    resolvePid(pidValue).then((res) => {
       if (res.ok) {
         setResolved({ group: res.group, phase_order: res.phase_order });
         setStatus("ready");
@@ -634,13 +634,47 @@ function SetupScreen({ onStart }) {
       setStatus("error");
       if (res.error === "network_error") {
         setErrorMsg("サーバーに接続できませんでした。ネットワーク接続を確認して、再読み込みしてください。");
-      } else if (res.error === "no_matching_range") {
-        setErrorMsg(`参加者ID「${pidParam}」に対応する割り当てが見つかりませんでした。実験担当者にお知らせください。`);
+      } else if (res.error === "no_matching_range" || res.error === "invalid_pid" || res.error === "missing_pid") {
+        setErrorMsg(`座席番号「${pidValue}」に対応する割り当てが見つかりませんでした。実験担当者にお知らせください。`);
       } else {
-        setErrorMsg(`参加者ID「${pidParam}」の確認に失敗しました（${res.detail || res.error}）。実験担当者にお知らせください。`);
+        setErrorMsg(`座席番号「${pidValue}」の確認に失敗しました（${res.detail || res.error}）。実験担当者にお知らせください。`);
       }
     });
+  }
+
+  useEffect(() => {
+    if (pidFromUrl) attemptResolve(pidFromUrl);
   }, []);
+
+  if (status === "input") {
+    const trimmed = pidInput.trim();
+    return (
+      <div className="max-w-md mx-auto mt-24 bg-white rounded-2xl shadow-xl p-8">
+        <h1 className="text-xl font-bold text-slate-800 mb-2">座席番号を入力してください</h1>
+        <p className="text-slate-500 text-sm mb-6">お手元の座席に記載されている番号を入力し、「確認する」を押してください。</p>
+        <input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          value={pidInput}
+          onChange={(e) => setPidInput(e.target.value.replace(/[^0-9]/g, ""))}
+          onKeyDown={(e) => { if (e.key === "Enter" && trimmed) attemptResolve(trimmed); }}
+          placeholder="例：34"
+          className="w-full border border-slate-300 rounded-lg px-4 py-3 text-center text-2xl font-mono tracking-widest mb-6 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          autoFocus
+        />
+        <button
+          disabled={!trimmed}
+          onClick={() => attemptResolve(trimmed)}
+          className={`w-full py-3 rounded-xl font-semibold transition ${
+            trimmed ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+          }`}
+        >
+          確認する
+        </button>
+      </div>
+    );
+  }
 
   if (status === "loading") {
     return <div className="max-w-md mx-auto mt-24 text-center text-slate-500">読み込み中...</div>;
@@ -652,10 +686,10 @@ function SetupScreen({ onStart }) {
         <h1 className="text-xl font-bold text-red-600 mb-3">実験を開始できません</h1>
         <p className="text-slate-600 mb-6 text-sm leading-relaxed">{errorMsg}</p>
         <button
-          onClick={() => window.location.reload()}
+          onClick={() => (pidFromUrl ? window.location.reload() : setStatus("input"))}
           className="px-6 py-2 rounded-lg bg-slate-200 text-slate-700 hover:bg-slate-300 text-sm font-semibold"
         >
-          再読み込み
+          {pidFromUrl ? "再読み込み" : "もう一度入力する"}
         </button>
       </div>
     );
