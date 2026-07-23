@@ -949,7 +949,6 @@ function DiscussionScreen({ group, topic, onFinish }) {
   const [messages, setMessages] = useState([{ sender: "ai", text: greet }]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [isComposing, setIsComposing] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const startRef = useRef(Date.now());
   const chatEndRef = useRef(null);
@@ -1044,16 +1043,12 @@ function DiscussionScreen({ group, topic, onFinish }) {
           <div ref={chatEndRef} />
         </div>
         <div className="mt-3 flex gap-2">
+          {/* Enter では送信しない。日本語入力の変換確定でEnterを押す習慣があるため、
+              打ち終える前に意図せず送信されてしまう事故を防ぐ。送信は送信ボタンのみ。 */}
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onCompositionStart={() => setIsComposing(true)}
-            onCompositionEnd={() => setIsComposing(false)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !isComposing && !e.nativeEvent.isComposing) {
-                handleSend();
-              }
-            }}
+            onKeyDown={(e) => { if (e.key === "Enter") e.preventDefault(); }}
             disabled={isSending}
             placeholder={`${topic.theme}についての考えを入力する...`}
             className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:bg-slate-50"
