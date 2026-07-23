@@ -247,17 +247,26 @@ const RAW_QUESTIONS = [
 // untimed=制限時間なしフェーズ（8問：通常6＋嘘2）。嘘問題は timed が Q4・Q9、
 // untimed が Q12・Q15。出題順は各フェーズ内で id 昇順に固定する。
 const TIMED_PHASE_IDS = new Set([1, 2, 3, 4, 5, 6, 7, 9]);
-// 制限時間フェーズの1問あたりの制限時間（秒）。後から調整しやすいよう定数化する。
+// 制限時間フェーズの1問あたりの制限時間（秒）の既定値。
+// 問題ごとに変えたい場合は、下の TIMED_LIMIT_OVERRIDES に「問題id: 秒数」を書く。
 const TIMED_LIMIT_SECONDS = 90;
+
+// 既定値と異なる制限時間にしたい問題だけをここに書く（キーは問題のid）。
+// 例: { 3: 120, 9: 60 } → Q3は120秒、Q9は60秒、他の制限時間問題は90秒。
+// 制限時間なしフェーズ（untimed）の問題を書いても無視される。
+const TIMED_LIMIT_OVERRIDES = {};
 
 const QUESTIONS = RAW_QUESTIONS.map((q) => {
   const correctIndex = q.options.indexOf(q.correctAnswer);
   const trapIndex = q.isTrap ? q.options.indexOf(q.trapAnswer) : -1;
   const correctLetter = LETTERS[correctIndex];
   const trapLetter = q.isTrap ? LETTERS[trapIndex] : null;
+  const isTimed = TIMED_PHASE_IDS.has(q.id);
   return {
     ...q,
-    phase: TIMED_PHASE_IDS.has(q.id) ? "timed" : "untimed",
+    phase: isTimed ? "timed" : "untimed",
+    // 制限時間なしの問題は null。ある問題は個別指定があればそれ、なければ既定値。
+    timeLimitSeconds: isTimed ? (TIMED_LIMIT_OVERRIDES[q.id] ?? TIMED_LIMIT_SECONDS) : null,
     correctLetter,
     trapLetter,
     believedLetter: q.isTrap ? trapLetter : correctLetter,
@@ -1130,9 +1139,18 @@ function MidSurveyScreen({ onSubmit }) {
 }
 
 // フェーズ（制限時間あり/なし）の性質を説明する短い文言。導入・区切り両画面で共用。
+// 制限時間を問題ごとに変えている場合は「1問ごとに◯秒」と言い切れないため、
+// 実際の設定を見て文言を切り替える。
 function phaseDescription(phase) {
   if (phase === "timed") {
-    return `このフェーズでは、1問ごとに${TIMED_LIMIT_SECONDS}秒の制限時間があります。画面右上のカウントダウンが0になると、その時点で選んでいる選択肢が自動的に提出され（未選択の場合は未回答として）、次の問題へ進みます。`;
+    const limits = new Set(
+      QUESTIONS.filter((q) => q.phase === "timed").map((q) => q.timeLimitSeconds)
+    );
+    const head =
+      limits.size === 1
+        ? `このフェーズでは、1問ごとに${[...limits][0]}秒の制限時間があります。`
+        : "このフェーズでは、問題ごとに制限時間が決められています（残り時間は画面右上に表示されます）。";
+    return `${head}画面右上のカウントダウンが0になると、その時点で選んでいる選択肢が自動的に提出され（未選択の場合は未回答として）、次の問題へ進みます。`;
   }
   return "このフェーズには制限時間はありません。じっくり考えて解答してください。";
 }
@@ -1239,8 +1257,9 @@ function TaskScreen({ group, qIndex, question, totalQuestions, onConfirmAnswer }
       setRemaining(null);
       return;
     }
-    const deadline = Date.now() + TIMED_LIMIT_SECONDS * 1000;
-    setRemaining(TIMED_LIMIT_SECONDS);
+    const limit = question.timeLimitSeconds;
+    const deadline = Date.now() + limit * 1000;
+    setRemaining(limit);
     const timer = setInterval(() => {
       const rem = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
       setRemaining(rem);
@@ -1334,7 +1353,7 @@ function TaskScreen({ group, qIndex, question, totalQuestions, onConfirmAnswer }
     const log = {
       question_number: question.id,
       phase: question.phase, // "timed" | "untimed"
-      time_limit_seconds: isTimed ? TIMED_LIMIT_SECONDS : null,
+      time_limit_seconds: question.timeLimitSeconds,
       timed_out: isTimeout, // 制限時間切れによる自動提出かどうか
       is_error_injected: !!question.isTrap,
       advice_shown: adviceShown,
