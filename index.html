@@ -722,7 +722,7 @@ function SetupScreen({ onStart }) {
 // ---------------------------------------------------------------------------
 // 画面2：事前アンケート画面
 // ---------------------------------------------------------------------------
-function PreSurveyScreen({ onSubmit }) {
+function PreSurveyScreen({ onSubmit, group }) {
   const [q1, setQ1] = useState(null);
   const [q2, setQ2] = useState(null);
   const [topicId, setTopicId] = useState(null);
@@ -731,6 +731,9 @@ function PreSurveyScreen({ onSubmit }) {
   const [q5, setQ5] = useState(null);
   const [q6, setQ6] = useState(null);
   const selectedTopic = DISCUSSION_TOPICS.find((t) => t.id === topicId) || null;
+  // G3（議論なし群）は自由議論を行わないため、「議論したいテーマ」と尋ねると
+  // 実施しない議論を予告することになる。関心を問う文言に差し替える。
+  const isNoDiscussion = group === "G3_NoDiscussion";
   const canSubmit =
     q1 !== null && q2 !== null && topicId !== null &&
     q3 !== null && q4 !== null && q5 !== null && q6 !== null;
@@ -759,9 +762,13 @@ function PreSurveyScreen({ onSubmit }) {
 
       <div className="mb-6">
         <p className="font-medium text-slate-800 mb-2">
-          Q3. 以下の4つのテーマから、あなたが議論したいテーマを1つ選んでください。
+          {isNoDiscussion
+            ? "Q3. 以下の4つのテーマから、あなたが最も関心のあるテーマを1つ選んでください。"
+            : "Q3. 以下の4つのテーマから、あなたが議論したいテーマを1つ選んでください。"}
           <span className="block text-sm text-slate-500 font-normal mt-1">
-            ここで選んだテーマが、このあとの自由議論のテーマになります。
+            {isNoDiscussion
+              ? "ここで選んだテーマについて、続けていくつかの質問にお答えいただきます。"
+              : "ここで選んだテーマが、このあとの自由議論のテーマになります。"}
           </span>
         </p>
         <div className="grid grid-cols-2 gap-3">
@@ -1924,7 +1931,7 @@ function App() {
         </div>
       </header>
       {phase === "setup" && <SetupScreen onStart={handleStart} />}
-      {phase === "preSurvey" && <PreSurveyScreen onSubmit={handlePreSurveySubmit} />}
+      {phase === "preSurvey" && <PreSurveyScreen onSubmit={handlePreSurveySubmit} group={group} />}
       {phase === "baseline" && <BaselineTestScreen onFinish={handleBaselineFinish} />}
       {phase === "discussion" && (
         <DiscussionScreen group={group} topic={topic} onFinish={handleDiscussionFinish} />
