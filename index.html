@@ -44,7 +44,8 @@ const LETTERS = ["A","B","C","D","E","F","G","H","I","J"];
 // ディスカッションのトピックは管理者が実験開始時に4つから選択する。
 // 各トピックは、挨拶・システム指示・アンケートの賛否/重要度の文言に差し込むための
 // 言い回しを持つ（theme=「〜」というテーマ、stanceObject=〜に賛成である、
-// debatePhrase=テーマ（〜）について、greetingObject=〜について どう思いますか）。
+// debatePhrase=テーマ（〜）について、greetingObject=〜について どう思いますか、
+// benefitObject=〜は社会に大きな利益をもたらす、newsObject=〜に関するニュース）。
 const DISCUSSION_TOPICS = [
   {
     id: "self_driving",
@@ -53,6 +54,8 @@ const DISCUSSION_TOPICS = [
     stanceObject: "自動運転車の社会への普及",
     debatePhrase: "自動運転車の普及の是非",
     greetingObject: "自動運転車が社会に広く普及していくこと",
+    benefitObject: "自動運転技術の導入",
+    newsObject: "自動運転や関連技術",
   },
   {
     id: "four_day_week",
@@ -61,6 +64,8 @@ const DISCUSSION_TOPICS = [
     stanceObject: "週休3日制の導入",
     debatePhrase: "週休3日制導入の是非",
     greetingObject: "週休3日制が社会に広く導入されていくこと",
+    benefitObject: "週休3日制の導入",
+    newsObject: "週休3日制や働き方改革",
   },
   {
     id: "plastic_bag_fee",
@@ -69,6 +74,8 @@ const DISCUSSION_TOPICS = [
     stanceObject: "レジ袋の有料化",
     debatePhrase: "レジ袋有料化の是非",
     greetingObject: "レジ袋の有料化が広く行われていくこと",
+    benefitObject: "レジ袋有料化の実施",
+    newsObject: "レジ袋有料化や環境問題",
   },
   {
     id: "nuclear_restart",
@@ -77,6 +84,8 @@ const DISCUSSION_TOPICS = [
     stanceObject: "原子力発電所の再稼働",
     debatePhrase: "原発再稼働の是非",
     greetingObject: "原子力発電所が再稼働していくこと",
+    benefitObject: "原子力発電所の再稼働",
+    newsObject: "原発再稼働やエネルギー政策",
   },
 ];
 // ディスカッションの最低実施時間（秒）。この時間が経過するまで終了操作は出さない。
@@ -326,6 +335,100 @@ const BASELINE_QUESTIONS = BASELINE_RAW_QUESTIONS.map((q) => {
   const correctIndex = q.options.indexOf(q.correctAnswer);
   return { ...q, correctLetter: LETTERS[correctIndex] };
 });
+
+// ---------------------------------------------------------------------------
+// 事前アンケートの項目定義。7段階リッカート尺度（1: 全くそう思わない 〜 7: 非常にそう思う）。
+//
+// キー名はそのまま集計スクリプト（aggregate_results.py の PRE_SURVEY_KEYS）の
+// 列名になる。既存6項目（q1_nfc / q2_pre_efficacy / q3_pre_av_stance /
+// q4_topic_importance / q5_ai_accuracy_belief / q6_ai_literacy）のキーは、
+// 旧アンケートで回答済みの被験者データと突き合わせられなくなるため変更しないこと。
+//
+// reversed: true は逆転項目。集計側で 8 - x に反転してから構成概念の平均に入れる。
+// セクション見出しは被験者にも見えるため、「認知欲求」「自己効力感」のような
+// 構成概念名は出さず、中立的な言い回しにしている（需要特性を避けるため）。
+//
+// ここに定義するのはテーマに依存しない項目のみ。テーマ賛成度・関与度の項目は、
+// 被験者が選んだテーマの言い回しを差し込む必要があるため
+// buildTopicPreSurveySections() 側で組み立てる。
+// ---------------------------------------------------------------------------
+const PRE_SURVEY_SECTIONS = [
+  {
+    title: "考えることについて",
+    items: [
+      { key: "q1_nfc", label: "私は、複雑な問題について深く考えることが必要なタスクを好む" },
+      { key: "q1b_nfc_new_problems", label: "考えることを必要とする新しい問題に取り組むのが好きだ" },
+      { key: "q1c_nfc_simple_pref_r", label: "抽象的な思考よりも、単純な作業の方を好む", reversed: true },
+      { key: "q1d_nfc_core_concepts", label: "自分の頭を使って物事の根本的な概念を理解することを楽しんでいる" },
+    ],
+  },
+  {
+    title: "論理・計算問題について",
+    items: [
+      { key: "q2_pre_efficacy", label: "私は現時点で、この手の論理・計算問題（SPI等）を自力で正しく解く自信がある" },
+      { key: "q2b_efficacy_find_method", label: "難しめの論理・計算問題であっても、解き方を自分で見つけ出せると思う" },
+      { key: "q2c_efficacy_self_check", label: "自分の計算や推論に間違いがないか、自力でチェック・修正する能力がある" },
+    ],
+  },
+  {
+    title: "AIについての考え",
+    items: [
+      { key: "q5_ai_accuracy_belief", label: "一般的なAI技術（ChatGPTなど）の出力は、人間よりも正確で信頼できると思う" },
+      { key: "q5b_ai_trust_partner", label: "AIアシスタントは、複雑な問題を解くための頼もしいパートナーだと思う" },
+      { key: "q5c_ai_trust_explanation", label: "AIが提示する解説や計算プロセスは、基本的に信用できる" },
+    ],
+  },
+  {
+    title: "AIの利用経験",
+    items: [
+      { key: "q6_ai_literacy", label: "私は日常的に生成AIを利用しており、その仕組みや限界をある程度理解している" },
+      { key: "q6b_ai_literacy_prompt", label: "AIに望む答えを出させるための適切なプロンプト（指示）の出し方を知っている" },
+      { key: "q6c_ai_literacy_hallucination_risk", label: "生成AIが間違った情報（ハルシネーション等）を吐くリスクがあることを意識している" },
+      { key: "q6d_ai_literacy_task_fit", label: "どのようなタスクでAIを使い、どのようなタスクで使うべきでないかを識別できる" },
+    ],
+  },
+];
+
+// テーマ選択後に出題する、選ばれたテーマについての項目（賛成度2項目・関与度2項目）。
+function buildTopicPreSurveySections(topic) {
+  return [
+    {
+      title: "選んだテーマについて",
+      items: [
+        {
+          key: "q3_pre_av_stance",
+          label: `私は現時点で、${topic.stanceObject}に賛成である`,
+          leftLabel: "全く賛成しない",
+          rightLabel: "強く賛成する",
+        },
+        { key: "q3b_topic_benefit", label: `${topic.benefitObject}は、社会に大きな利益をもたらすと思う` },
+        { key: "q4_topic_importance", label: `「${topic.label}」というテーマは、私自身の生活や社会にとって重要（関連性が高い）だと思う` },
+        { key: "q4b_topic_news_interest", label: `私は普段から、${topic.newsObject}に関するニュースに関心を持っている` },
+      ],
+    },
+  ];
+}
+
+// テーマに紐づく項目のキー一覧。テーマを選び直したときの回答リセットに使う。
+// 文言はテーマごとに変わるがキーは共通なので、代表として先頭のテーマから取り出す。
+const TOPIC_PRE_SURVEY_KEYS = buildTopicPreSurveySections(DISCUSSION_TOPICS[0])
+  .flatMap((section) => section.items.map((item) => item.key));
+
+// 保存・書き出し用に、事前アンケートの回答を決まった順序のオブジェクトへ組み立てる。
+// 被験者が答えた順ではなく常に同じキー順になるので、ログのJSONが読みやすくなる。
+// 未回答（提出前）のキーが混ざらないよう、提出時にのみ呼ぶ。
+function buildPreSurveyPayload(answers, topic) {
+  const payload = {};
+  PRE_SURVEY_SECTIONS.forEach((section) => {
+    section.items.forEach((item) => { payload[item.key] = answers[item.key]; });
+  });
+  payload.selected_topic_id = topic.id;
+  payload.selected_topic_label = topic.label;
+  buildTopicPreSurveySections(topic).forEach((section) => {
+    section.items.forEach((item) => { payload[item.key] = answers[item.key]; });
+  });
+  return payload;
+}
 
 // 中間アンケート（自由議論とSPIの間）の22項目。7段階リッカート尺度。
 // すべて「1: 全くそう思わない 〜 7: 非常にそう思う」で回答する。
@@ -736,48 +839,72 @@ function SetupScreen({ onStart }) {
 // 画面2：事前アンケート画面
 // ---------------------------------------------------------------------------
 function PreSurveyScreen({ onSubmit, group }) {
-  const [q1, setQ1] = useState(null);
-  const [q2, setQ2] = useState(null);
+  // 回答は「キー -> 1〜7」の1つのオブジェクトで保持する（項目数が多いため）。
+  const [answers, setAnswers] = useState({});
   const [topicId, setTopicId] = useState(null);
-  const [q3, setQ3] = useState(null);
-  const [q4, setQ4] = useState(null);
-  const [q5, setQ5] = useState(null);
-  const [q6, setQ6] = useState(null);
   const selectedTopic = DISCUSSION_TOPICS.find((t) => t.id === topicId) || null;
   // G3（議論なし群）は自由議論を行わないため、「議論したいテーマ」と尋ねると
   // 実施しない議論を予告することになる。関心を問う文言に差し替える。
   const isNoDiscussion = group === "G3_NoDiscussion";
+  const topicSections = selectedTopic ? buildTopicPreSurveySections(selectedTopic) : [];
+
+  const generalKeys = PRE_SURVEY_SECTIONS.flatMap((section) => section.items.map((item) => item.key));
   const canSubmit =
-    q1 !== null && q2 !== null && topicId !== null &&
-    q3 !== null && q4 !== null && q5 !== null && q6 !== null;
+    topicId !== null &&
+    generalKeys.every((key) => answers[key] != null) &&
+    TOPIC_PRE_SURVEY_KEYS.every((key) => answers[key] != null);
+
+  function setAnswer(key, value) {
+    setAnswers((prev) => ({ ...prev, [key]: value }));
+  }
 
   function handleSelectTopic(id) {
     setTopicId(id);
-    // テーマを選び直したら、そのテーマに紐づく賛否・重要度は選び直してもらう
-    setQ3(null);
-    setQ4(null);
+    // テーマを選び直したら、そのテーマに紐づく項目は選び直してもらう
+    setAnswers((prev) => {
+      const next = { ...prev };
+      TOPIC_PRE_SURVEY_KEYS.forEach((key) => { delete next[key]; });
+      return next;
+    });
+  }
+
+  // 画面に表示する通し番号（Q1, Q2, ...）。テーマ項目まで連番で振る。
+  let questionNo = 0;
+  function renderSection(section) {
+    return (
+      <div key={section.title} className="mb-8">
+        <h2 className="text-sm font-bold text-indigo-700 border-b border-slate-200 pb-1 mb-4">
+          {section.title}
+        </h2>
+        {section.items.map((item) => {
+          questionNo += 1;
+          return (
+            <LikertQuestion
+              key={item.key}
+              label={`Q${questionNo}. ${item.label}`}
+              value={answers[item.key] ?? null}
+              onChange={(value) => setAnswer(item.key, value)}
+              leftLabel={item.leftLabel}
+              rightLabel={item.rightLabel}
+            />
+          );
+        })}
+      </div>
+    );
   }
 
   return (
     <div className="max-w-2xl mx-auto mt-16 bg-white rounded-2xl shadow-xl p-8">
       <h1 className="text-2xl font-bold text-slate-800 mb-1">事前アンケート</h1>
       <p className="text-slate-500 mb-8">タスク開始前に、以下の質問にお答えください。</p>
-      <LikertQuestion
-        label="Q1. 私は、複雑な問題について深く考えることが必要なタスクを好む"
-        value={q1}
-        onChange={setQ1}
-      />
-      <LikertQuestion
-        label="Q2. 私は現時点で、この手の論理・計算問題（SPI等）を自力で正しく解く自信がある"
-        value={q2}
-        onChange={setQ2}
-      />
+
+      {PRE_SURVEY_SECTIONS.map(renderSection)}
 
       <div className="mb-6">
         <p className="font-medium text-slate-800 mb-2">
           {isNoDiscussion
-            ? "Q3. 以下の4つのテーマから、あなたが最も関心のあるテーマを1つ選んでください。"
-            : "Q3. 以下の4つのテーマから、あなたが議論したいテーマを1つ選んでください。"}
+            ? "以下の4つのテーマから、あなたが最も関心のあるテーマを1つ選んでください。"
+            : "以下の4つのテーマから、あなたが議論したいテーマを1つ選んでください。"}
           <span className="block text-sm text-slate-500 font-normal mt-1">
             {isNoDiscussion
               ? "ここで選んだテーマについて、続けていくつかの質問にお答えいただきます。"
@@ -805,45 +932,13 @@ function PreSurveyScreen({ onSubmit, group }) {
           <p className="text-sm text-slate-500 mb-4">
             選択したテーマ：<span className="font-bold text-indigo-700">{selectedTopic.label}</span>
           </p>
-          <LikertQuestion
-            label={`Q3-1. 私は現時点で、${selectedTopic.stanceObject}に賛成である`}
-            value={q3}
-            onChange={setQ3}
-            leftLabel="全く賛成しない"
-            rightLabel="強く賛成する"
-          />
-          <div className="mb-0">
-            <LikertQuestion
-              label={`Q3-2. 「${selectedTopic.label}」というテーマは、私自身の生活や社会にとって重要（関連性が高い）だと思う`}
-              value={q4}
-              onChange={setQ4}
-            />
-          </div>
+          {topicSections.map(renderSection)}
         </div>
       )}
 
-      <LikertQuestion
-        label="Q4. 一般的なAI技術（ChatGPTなど）の出力は、人間よりも正確で信頼できると思う"
-        value={q5}
-        onChange={setQ5}
-      />
-      <LikertQuestion
-        label="Q5. 私は日常的に生成AIを利用しており、その仕組みや限界をある程度理解している"
-        value={q6}
-        onChange={setQ6}
-      />
       <button
         disabled={!canSubmit}
-        onClick={() => onSubmit({
-          q1_nfc: q1,
-          q2_pre_efficacy: q2,
-          selected_topic_id: selectedTopic.id,
-          selected_topic_label: selectedTopic.label,
-          q3_pre_av_stance: q3,
-          q4_topic_importance: q4,
-          q5_ai_accuracy_belief: q5,
-          q6_ai_literacy: q6,
-        }, selectedTopic)}
+        onClick={() => onSubmit(buildPreSurveyPayload(answers, selectedTopic), selectedTopic)}
         className={`w-full py-3 rounded-xl font-semibold transition ${
           canSubmit ? "bg-indigo-600 text-white hover:bg-indigo-700" : "bg-slate-200 text-slate-400 cursor-not-allowed"
         }`}
@@ -1846,7 +1941,13 @@ function App() {
     setGroup(devGroup);
     setPhaseOrder("timed_first");
     setTopic(mockTopic);
-    setPreSurvey({ q1_nfc: 4, q2_pre_efficacy: 4, q3_pre_av_stance: 4, q4_topic_importance: 4, q5_ai_accuracy_belief: 4, q6_ai_literacy: 4 });
+    // 事前アンケートの全項目を中央値(4)で埋めたダミー。項目を増減しても
+    // 定義側（PRE_SURVEY_SECTIONS / buildTopicPreSurveySections）から自動で揃う。
+    const mockAnswers = {};
+    [...PRE_SURVEY_SECTIONS, ...buildTopicPreSurveySections(mockTopic)].forEach((section) => {
+      section.items.forEach((item) => { mockAnswers[item.key] = 4; });
+    });
+    setPreSurvey(buildPreSurveyPayload(mockAnswers, mockTopic));
     setBaselineLog({ correct_count: 2, total: 4, answers: [] });
     setDiscussionLog({ topic_id: mockTopic.id, topic: mockTopic.label, elapsed_seconds: 300, user_turn_count: 3, messages: [] });
     setMidSurvey({});
