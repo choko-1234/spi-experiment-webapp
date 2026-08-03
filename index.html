@@ -432,6 +432,8 @@ function buildPreSurveyPayload(answers, topic) {
 
 // 中間アンケート（自由議論とSPIの間）の22項目。7段階リッカート尺度。
 // すべて「1: 全くそう思わない 〜 7: 非常にそう思う」で回答する。
+// テーマ名を差し込む必要がある操作チェック2項目は下の
+// buildMidSurveyItems() で末尾に連結する。
 const MID_SURVEY_ITEMS = [
   { key: "q1_deceptive", label: "このシステムは人を欺く(騙す)ようなところがある" },
   { key: "q2_underhanded", label: "このシステムは卑怯(ずる賢い)な振る舞いをする" },
@@ -456,6 +458,38 @@ const MID_SURVEY_ITEMS = [
   { key: "q21_like_using", label: "課題をこなしたり、物事を考えたりする際、このシステムを使うのが好きだ。" },
   { key: "q22_personal_preference", label: "このシステムと一緒に物事を考え、決定することに個人的な好み(こだわり)がある" },
 ];
+
+// 中間アンケートの全項目（22項目＋操作チェック4項目）を返す。
+//
+// 末尾の4項目は、自由議論フェーズのAIが「同調的だったか／中立的だったか」を確認する
+// 操作チェック（manipulation check）。うちq23・q24はもと事後アンケートのQ10・Q11で、
+// SPI課題を挟む前の議論直後に測るほうが操作の効果を素直に捉えられるため、
+// 中間アンケートの末尾へ移した。キーは中間アンケートの続き番号にしている
+// （既存の q10_reliable / q11_trust と番号が衝突しないようにするため）。
+//
+// 4項目は2つの構成概念それぞれを2項目で測る形になっている。
+//   中立性: q23（偏らず中立的）と q25（賛否を公平に取り上げた）
+//   同調性: q24（意見に合わせて変化）と q26（意見に賛同する発言）
+// ほぼ同じ内容の設問が隣り合うと直前の回答をなぞられやすいため、
+// 同じ構成概念の2項目は隣接させず1問挟む並びにしている。
+//
+// なお、この4項目は自由議論のAIについて尋ねるものなので、自由議論も中間アンケートも
+// 行わないG3（議論なし群）では出題されない。
+function buildMidSurveyItems(topic) {
+  return [
+    ...MID_SURVEY_ITEMS,
+    {
+      key: "q23_manipulation_check_attitude",
+      label: `このAIは${topic.theme}というテーマについて、一方の意見に偏らず中立的だったと感じた`,
+    },
+    { key: "q24_manipulation_check_stance", label: "このAIは私の意見に合わせて変化した" },
+    {
+      key: "q25_manipulation_check_balance",
+      label: `このAIは${topic.theme}について、賛成意見と反対意見の両方を公平に取り上げていたと感じた`,
+    },
+    { key: "q26_manipulation_check_agreement", label: "このAIは、私が述べた意見に賛同するような発言をしたと感じた" },
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // バックエンドへのPOST（共通）。
@@ -507,6 +541,23 @@ async function resolvePid(pid) {
     return await res.json();
   } catch (err) {
     return { ok: false, error: "network_error" };
+  }
+}
+
+// 保存済みのスナップショットを取得する。誤ってページを再読み込みしてしまった
+// 参加者を、直前の区切りから再開させるために使う。
+// 復元できない場合（未保存・通信失敗・破損）は一律 null を返し、呼び出し側は
+// 通常の新規開始に進む。再開はあくまで救済手段なので、ここでの失敗が実験の
+// 開始そのものを妨げないようにしている。
+async function loadProgress(pid) {
+  if (DEV_MODE) return null; // 開発モードでは保存していないので復元もしない
+  try {
+    const res = await fetch(`${BACKEND_URL}?action=load&pid=${encodeURIComponent(pid)}`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.ok ? json.data : null;
+  } catch (err) {
+    return null;
   }
 }
 
@@ -729,14 +780,16 @@ function LikertQuestion({ label, value, onChange, leftLabel, rightLabel, scale =
 // 被験者が身構えて反応が歪むため、確認画面には参加者IDのみを出す。
 // 研究者が割り当てを確認したい場合は、スプレッドシートの Progress シートを見る。
 // ---------------------------------------------------------------------------
-function SetupScreen({ onStart }) {
+function SetupScreen({ onStart, onResume }) {
   const pidFromUrl = new URLSearchParams(window.location.search).get("pid");
   // input: 座席番号の入力待ち（URLにpidが無いとき）/ loading / error / ready
+  //      / resume: 中断された回答が見つかった / done: 既に回答を終えている
   const [status, setStatus] = useState(pidFromUrl ? "loading" : "input");
   const [errorMsg, setErrorMsg] = useState("");
   const [pid, setPid] = useState(pidFromUrl);
   const [pidInput, setPidInput] = useState("");
   const [resolved, setResolved] = useState(null); // { group, phase_order }
+  const [snapshot, setSnapshot] = useState(null); // 中断された回答（あれば）
 
   function attemptResolve(pidValue) {
     setPid(pidValue);
@@ -744,7 +797,22 @@ function SetupScreen({ onStart }) {
     resolvePid(pidValue).then((res) => {
       if (res.ok) {
         setResolved({ group: res.group, phase_order: res.phase_order });
-        setStatus("ready");
+        // 割り当てが解決できたら、続けて中断された回答の有無を調べる。
+        loadProgress(pidValue).then((data) => {
+          // 事後アンケートまで終えている場合は、二重回答になるため再開させない。
+          if (data && data.post_survey) {
+            setStatus("done");
+            return;
+          }
+          // current_phase が "preSurvey" のものは、開始直後に保存された空の記録。
+          // 再開しても新規開始と中身が同じなので、確認は挟まず通常どおり始める。
+          if (data && data.current_phase && data.current_phase !== "preSurvey") {
+            setSnapshot(data);
+            setStatus("resume");
+            return;
+          }
+          setStatus("ready");
+        });
         return;
       }
       setStatus("error");
@@ -807,6 +875,47 @@ function SetupScreen({ onStart }) {
         >
           {pidFromUrl ? "再読み込み" : "もう一度入力する"}
         </button>
+      </div>
+    );
+  }
+
+  // 中断された回答が見つかった場合の確認画面。
+  // どのフェーズまで進んでいたか・どの条件に割り当てられているかは、需要特性を
+  // 生まないよう一切示さない（開始確認画面と同じ方針）。
+  if (status === "resume") {
+    return (
+      <div className="max-w-md mx-auto mt-24 bg-white rounded-2xl shadow-xl p-8">
+        <h1 className="text-xl font-bold text-slate-800 mb-2">回答の途中記録が見つかりました</h1>
+        <p className="text-slate-600 text-sm leading-relaxed mb-6">
+          前回の回答が途中で終了しています。続きから再開するか、最初からやり直すかを選んでください。
+          わからない場合は「続きから再開する」を選んでください。
+        </p>
+        <button
+          onClick={() => onResume(snapshot)}
+          className="w-full py-3 mb-3 rounded-xl font-semibold transition bg-indigo-600 text-white hover:bg-indigo-700"
+        >
+          続きから再開する
+        </button>
+        <button
+          onClick={() => setStatus("ready")}
+          className="w-full py-3 rounded-xl font-semibold transition bg-slate-100 text-slate-600 hover:bg-slate-200"
+        >
+          最初からやり直す
+        </button>
+      </div>
+    );
+  }
+
+  // 事後アンケートまで送信済み。もう一度回答されるとデータが上書きされるため、
+  // 開始する手段は用意せずここで止める。
+  if (status === "done") {
+    return (
+      <div className="max-w-md mx-auto mt-24 bg-white rounded-2xl shadow-xl p-8 text-center">
+        <h1 className="text-xl font-bold text-slate-800 mb-3">回答は完了しています</h1>
+        <p className="text-slate-600 text-sm leading-relaxed">
+          この座席番号の回答はすべて終了しています。ご協力ありがとうございました。
+          このまま画面を閉じずにお待ちください。
+        </p>
       </div>
     );
   }
@@ -1195,12 +1304,13 @@ function DiscussionScreen({ group, topic, onFinish }) {
 }
 
 // ---------------------------------------------------------------------------
-// 画面3.7：中間アンケート（自由議論とSPIの間、22問・7段階リッカート）
+// 画面3.7：中間アンケート（自由議論とSPIの間、26問・7段階リッカート）
 // G1/G2のみ実施。G3（議論なし）ではスキップされる。
 // ---------------------------------------------------------------------------
-function MidSurveyScreen({ onSubmit }) {
+function MidSurveyScreen({ onSubmit, topic }) {
   const [answers, setAnswers] = useState({});
-  const canSubmit = MID_SURVEY_ITEMS.every((item) => answers[item.key] != null);
+  const items = buildMidSurveyItems(topic);
+  const canSubmit = items.every((item) => answers[item.key] != null);
 
   function setAnswer(key, value) {
     setAnswers((prev) => ({ ...prev, [key]: value }));
@@ -1213,9 +1323,9 @@ function MidSurveyScreen({ onSubmit }) {
         先ほどのAIとの対話（システム）について、以下の各項目にどの程度あてはまるかをお答えください。
       </p>
       <p className="text-slate-400 text-sm mb-8">
-        1：全くそう思わない 〜 7：非常にそう思う の7段階でお答えください。（全{MID_SURVEY_ITEMS.length}問）
+        1：全くそう思わない 〜 7：非常にそう思う の7段階でお答えください。（全{items.length}問）
       </p>
-      {MID_SURVEY_ITEMS.map((item, i) => (
+      {items.map((item, i) => (
         <LikertQuestion
           key={item.key}
           scale={7}
@@ -1636,8 +1746,6 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   const [q7, setQ7] = useState(null);
   const [q8, setQ8] = useState(null);
   const [q9, setQ9] = useState(null);
-  const [q10, setQ10] = useState(null);
-  const [q11, setQ11] = useState(null);
   const [q12, setQ12] = useState(null);
   const [submitted, setSubmitted] = useState(!!devSubmitted); // 開発モードでは最終画面へ直行できる
   const [copied, setCopied] = useState(false);
@@ -1647,8 +1755,11 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
   const canSubmit =
     q1 !== null && q2 !== null && q3 !== null && q4 !== null &&
     q5 !== null && q6 !== null && q7 !== null && q8 !== null &&
-    q9 !== null && q10 !== null && q11 !== null && q12 !== null;
+    q9 !== null && q12 !== null;
 
+  // 旧Q10・Q11（操作チェック）は中間アンケートの末尾（q23・q24）へ移したため、
+  // ここには無い。q12_post_av_stance のキーは、既存データや集計スクリプトと
+  // 突き合わせられなくなるため、画面表示がQ10に繰り上がっても変更しない。
   const postSurvey = {
     q1_post_efficacy: q1,
     q2_cognitive_trust: q2,
@@ -1659,8 +1770,6 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
     q7_reactance_cognitive: q7,
     q8_overreliance_self: q8,
     q9_appropriate_reliance_self: q9,
-    q10_manipulation_check_attitude: q10,
-    q11_manipulation_check_stance: q11,
     q12_post_av_stance: q12,
   };
 
@@ -1672,7 +1781,7 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
     }),
     [
       pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, submitted,
-      q1, q2, q3, q4, q5, q6, q7, q8, q9, q10, q11, q12,
+      q1, q2, q3, q4, q5, q6, q7, q8, q9, q12,
     ]
   );
 
@@ -1770,17 +1879,7 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
           onChange={setQ9}
         />
         <LikertQuestion
-          label={`Q10. このAIは${topic.theme}というテーマについて、一方の意見に偏らず中立的だったと感じた`}
-          value={q10}
-          onChange={setQ10}
-        />
-        <LikertQuestion
-          label="Q11. このAIは私の意見に合わせて変化した"
-          value={q11}
-          onChange={setQ11}
-        />
-        <LikertQuestion
-          label={`Q12. 私は現時点で、${topic.stanceObject}に賛成である`}
+          label={`Q10. 私は現時点で、${topic.stanceObject}に賛成である`}
           value={q12}
           onChange={setQ12}
           leftLabel="全く賛成しない"
@@ -1985,6 +2084,29 @@ function App() {
     }));
   }
 
+  // 保存済みスナップショットから状態を復元し、直前の区切りへ戻す。
+  // group / phase_order は割り当て表に問い合わせ直さず、保存された値をそのまま
+  // 使う。実験中に Ranges シートを編集していた場合でも、それまでのログと
+  // 矛盾した条件で続きを受けさせないため。
+  // 保存はフェーズの区切りごとなので、中断したフェーズの途中経過（回答途中の
+  // ベースラインテスト・自由議論のやりとり）は復元されず、そのフェーズの
+  // 頭からやり直しになる。SPI本タスクだけは1問ごとに保存しているため、
+  // 最後に確定した設問の次から再開する。
+  function handleResume(snapshot) {
+    const savedLogs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
+    setPid(snapshot.pid);
+    setGroup(snapshot.group);
+    setPhaseOrder(snapshot.phase_order);
+    setTopic(DISCUSSION_TOPICS.find((t) => t.id === snapshot.topic_id) || null);
+    setPreSurvey(snapshot.pre_survey);
+    setBaselineLog(snapshot.baseline_test_log);
+    setDiscussionLog(snapshot.discussion_log);
+    setMidSurvey(snapshot.mid_survey);
+    setLogs(savedLogs);
+    setQIndex(savedLogs.length); // 未回答の設問が次に来る
+    setPhase(snapshot.current_phase);
+  }
+
   function handlePreSurveySubmit(answers, selectedTopic) {
     // 議論トピックは事前アンケートで被験者自身が選択する。
     // 選ばれたトピックが、以降の自由議論・事後アンケートに引き継がれる。
@@ -2054,13 +2176,13 @@ function App() {
           <h1 className="text-lg font-bold text-slate-800">ディスカッション × SPI × AIアシスタント 協働実験プラットフォーム</h1>
         </div>
       </header>
-      {phase === "setup" && <SetupScreen onStart={handleStart} />}
+      {phase === "setup" && <SetupScreen onStart={handleStart} onResume={handleResume} />}
       {phase === "preSurvey" && <PreSurveyScreen onSubmit={handlePreSurveySubmit} group={group} />}
       {phase === "baseline" && <BaselineTestScreen onFinish={handleBaselineFinish} />}
       {phase === "discussion" && (
         <DiscussionScreen group={group} topic={topic} onFinish={handleDiscussionFinish} />
       )}
-      {phase === "midSurvey" && <MidSurveyScreen onSubmit={handleMidSurveySubmit} />}
+      {phase === "midSurvey" && <MidSurveyScreen onSubmit={handleMidSurveySubmit} topic={topic} />}
       {phase === "spiIntro" && (
         <SpiIntroScreen
           firstPhase={orderedQuestions[0] ? orderedQuestions[0].phase : null}
