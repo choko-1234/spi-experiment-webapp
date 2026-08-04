@@ -574,11 +574,14 @@ async function saveProgress(pid, phase, data) {
 
 // 保存・書き出し用のデータ構造。フェーズ途中の自動保存でも最終結果の書き出しでも
 // 同じ形になるよう、組み立てはここに一本化する（集計スクリプトが読む形式）。
-function buildExportData({ pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, postSurvey, logs }) {
+function buildExportData({ pid, group, phaseOrder, startedAt, topic, preSurvey, baselineLog, discussionLog, midSurvey, postSurvey, logs }) {
   return {
     pid,
     group,
     phase_order: phaseOrder,
+    // 実験を開始した瞬間の時刻（UTC・ISO形式）。バックエンドが付ける last_updated が
+    // 「最後に保存した時刻」なので、この2つで所要時間が出せる。
+    started_at: startedAt || null,
     topic_id: topic ? topic.id : null,
     topic_label: topic ? topic.label : null,
     pre_survey: preSurvey,
@@ -1736,7 +1739,7 @@ function TaskScreen({ group, qIndex, question, totalQuestions, onConfirmAnswer }
 // ---------------------------------------------------------------------------
 // 画面5：事後アンケート＋結果画面
 // ---------------------------------------------------------------------------
-function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, onReset, devSubmitted }) {
+function ResultScreen({ pid, group, phaseOrder, startedAt, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, onReset, devSubmitted }) {
   const [q1, setQ1] = useState(null);
   const [q2, setQ2] = useState(null);
   const [q3, setQ3] = useState(null);
@@ -1775,12 +1778,12 @@ function ResultScreen({ pid, group, phaseOrder, topic, preSurvey, baselineLog, d
 
   const exportData = useMemo(
     () => buildExportData({
-      pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey,
+      pid, group, phaseOrder, startedAt, topic, preSurvey, baselineLog, discussionLog, midSurvey,
       postSurvey: submitted ? postSurvey : null,
       logs,
     }),
     [
-      pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, submitted,
+      pid, group, phaseOrder, startedAt, topic, preSurvey, baselineLog, discussionLog, midSurvey, logs, submitted,
       q1, q2, q3, q4, q5, q6, q7, q8, q9, q12,
     ]
   );
@@ -2019,6 +2022,7 @@ function App() {
   const [pid, setPid] = useState(null);
   const [group, setGroup] = useState(null);
   const [phaseOrder, setPhaseOrder] = useState(null); // "timed_first" | "untimed_first"
+  const [startedAt, setStartedAt] = useState(null);   // 実験開始時刻（UTC・ISO形式）
   const [topic, setTopic] = useState(null);
   const [preSurvey, setPreSurvey] = useState(null);
   const [baselineLog, setBaselineLog] = useState(null);
@@ -2039,6 +2043,7 @@ function App() {
     setPid("DEV");
     setGroup(devGroup);
     setPhaseOrder("timed_first");
+    setStartedAt(new Date().toISOString());
     setTopic(mockTopic);
     // 事前アンケートの全項目を中央値(4)で埋めたダミー。項目を増減しても
     // 定義側（PRE_SURVEY_SECTIONS / buildTopicPreSurveySections）から自動で揃う。
@@ -2066,19 +2071,21 @@ function App() {
   // await しないのは意図的で、保存の完了を待って画面遷移が止まらないようにしている。
   function save(nextPhase, snapshot) {
     saveProgress(pid, nextPhase, buildExportData(Object.assign(
-      { pid, group, phaseOrder, topic, preSurvey, baselineLog, discussionLog, midSurvey, postSurvey: null, logs },
+      { pid, group, phaseOrder, startedAt, topic, preSurvey, baselineLog, discussionLog, midSurvey, postSurvey: null, logs },
       snapshot
     )));
   }
 
   function handleStart(selectedPid, selectedGroup, selectedPhaseOrder) {
+    const now = new Date().toISOString(); // 「実験を開始する」を押した瞬間
     setPid(selectedPid);
     setGroup(selectedGroup);
     setPhaseOrder(selectedPhaseOrder);
+    setStartedAt(now);
     setPhase("preSurvey");
     // この時点ではまだ state が更新されていないため、解決済みの値を直接渡す。
     saveProgress(selectedPid, "preSurvey", buildExportData({
-      pid: selectedPid, group: selectedGroup, phaseOrder: selectedPhaseOrder,
+      pid: selectedPid, group: selectedGroup, phaseOrder: selectedPhaseOrder, startedAt: now,
       topic: null, preSurvey: null, baselineLog: null, discussionLog: null,
       midSurvey: null, postSurvey: null, logs: [],
     }));
@@ -2097,6 +2104,8 @@ function App() {
     setPid(snapshot.pid);
     setGroup(snapshot.group);
     setPhaseOrder(snapshot.phase_order);
+    // 開始時刻は再開時に付け直さず、最初に始めたときの値を引き継ぐ。
+    setStartedAt(snapshot.started_at || null);
     setTopic(DISCUSSION_TOPICS.find((t) => t.id === snapshot.topic_id) || null);
     setPreSurvey(snapshot.pre_survey);
     setBaselineLog(snapshot.baseline_test_log);
@@ -2159,6 +2168,7 @@ function App() {
     setPid(null);
     setGroup(null);
     setPhaseOrder(null);
+    setStartedAt(null);
     setTopic(null);
     setPreSurvey(null);
     setBaselineLog(null);
@@ -2210,6 +2220,7 @@ function App() {
           pid={pid}
           group={group}
           phaseOrder={phaseOrder}
+          startedAt={startedAt}
           topic={topic}
           preSurvey={preSurvey}
           baselineLog={baselineLog}
